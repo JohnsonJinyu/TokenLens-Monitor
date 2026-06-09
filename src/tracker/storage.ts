@@ -5,9 +5,9 @@
 import * as vscode from 'vscode';
 import type { UsageEntry, BalanceInfo } from '../providers/base';
 
-const KEY_USAGE_HISTORY = 'deepseekMonitor.usageHistory';
-const KEY_SESSION_STATS = 'deepseekMonitor.sessionStats';
-const KEY_BALANCE_CACHE = 'deepseekMonitor.balanceCache';
+const KEY_USAGE_HISTORY = 'tokenLens.usageHistory';
+const KEY_SESSION_STATS = 'tokenLens.sessionStats';
+const KEY_BALANCE_CACHE = 'tokenLens.balanceCache';
 
 export interface SessionStats {
   startTime: number;

@@ -1,6 +1,6 @@
 /**
  * 状态栏管理器。
- * 本体保持紧凑，tooltip 展示余额、Token、缓存、上下文和数据源健康。
+ * 本体保持紧凑，tooltip 只展示关键摘要，详细信息放到面板里。
  */
 
 import * as vscode from 'vscode';
@@ -60,8 +60,8 @@ export class StatusBarManager {
       vscode.StatusBarAlignment.Right,
       1000
     );
-    this.item.name = 'DeepSeek Monitor';
-    this.item.command = 'deepseekMonitor.showDashboard';
+    this.item.name = 'TokenLens';
+    this.item.command = 'tokenLens.showDashboard';
     this.item.text = '$(pulse) ¥0';
     this.item.tooltip = this.buildTooltip(null);
     this.item.backgroundColor = undefined;
@@ -117,9 +117,9 @@ export class StatusBarManager {
         '打开面板', '重置会话'
       ).then((choice) => {
         if (choice === '打开面板') {
-          vscode.commands.executeCommand('deepseekMonitor.showDashboard');
+          vscode.commands.executeCommand('tokenLens.showDashboard');
         } else if (choice === '重置会话') {
-          vscode.commands.executeCommand('deepseekMonitor.resetSession');
+          vscode.commands.executeCommand('tokenLens.resetSession');
         }
       });
     }
@@ -134,49 +134,46 @@ export class StatusBarManager {
     const last24h = this.buildLast24h(history);
     const cache = stats ? this.buildCacheSummary(stats) : { hitTokens: 0, missTokens: 0, hitRate: null };
     const primaryBalance = stats ? this.getPrimaryBalance(stats) : undefined;
+    const balanceText = primaryBalance
+      ? `${this.fmtMoney(primaryBalance.balance, primaryBalance.currency)} (${primaryBalance.provider})`
+      : (getApiKey() ? '等待接口返回' : '未配置 API Key');
+    const apiState = status.api.configured
+      ? (status.api.lastError ? `异常：${this.compactText(status.api.lastError)}` : '可用')
+      : '未配置';
+    const httpState = status.http.running
+      ? (status.http.parsedUsages > 0 ? `已捕获 ${status.http.parsedUsages} 条` : '监听中')
+      : '已关闭';
     const lines: string[] = [];
 
-    lines.push('### DeepSeek Monitor');
+    lines.push('### TokenLens');
     lines.push('');
-    lines.push('| 指标 | 当前值 |');
-    lines.push('|------|--------|');
-    lines.push(`| 账户余额 | ${primaryBalance ? `**${this.fmtMoney(primaryBalance.balance, primaryBalance.currency)}** ${primaryBalance.provider}` : '未查询'} |`);
-    lines.push(`| 会话费用 | ${stats ? `**${this.fmtMoney(stats.totalCost)}**` : this.fmtMoney(0)} |`);
-    lines.push(`| 近 24h 费用 | ${this.fmtMoney(last24h.cost)} |`);
-    lines.push(`| Token | ${stats ? this.fmtTokens(stats.totalTokens) : '0'} |`);
-    lines.push(`| 请求数 | ${stats ? stats.totalRequests : 0} |`);
-    lines.push(`| 缓存命中率 | ${cache.hitRate == null ? '暂无缓存明细' : `${cache.hitRate.toFixed(1)}%`} |`);
-    lines.push(`| 上下文占比 | ${stats?.lastContextPercent ? `${stats.lastContextPercent}% ${stats.lastModel}` : '未捕获'} |`);
+    lines.push(`**余额**  ${balanceText}`);
     lines.push('');
+    lines.push('**本次会话**');
+    lines.push(`费用：${stats ? this.fmtMoney(stats.totalCost) : this.fmtMoney(0)}`);
+    lines.push(`Token：${stats ? this.fmtTokens(stats.totalTokens) : '0'}　请求：${stats ? stats.totalRequests : 0} 次`);
+    lines.push('');
+    lines.push('**近 24 小时**');
+    lines.push(`费用：${this.fmtMoney(last24h.cost)}`);
+    lines.push(`Token：${this.fmtTokens(last24h.tokens)}　请求：${last24h.requests} 次`);
+    lines.push('');
+    lines.push('**状态**');
+    lines.push(`API 查询：${apiState}`);
+    lines.push(`HTTP 拦截：${httpState}`);
 
-    lines.push('### 余额明细');
-    const balances = stats ? this.getBalances(stats) : [];
-    if (balances.length === 0) {
-      lines.push(getApiKey() ? '已配置 API Key，等待余额接口返回。' : '未配置 API Key，无法查询平台余额。');
-    } else {
-      lines.push('| 服务商 | 剩余 | 已用 | 充值 | 赠送 | 更新时间 |');
-      lines.push('|--------|------|------|------|------|----------|');
-      for (const b of balances) {
-        lines.push(`| ${b.provider} | ${this.fmtMoney(b.balance, b.currency)} | ${this.fmtMoney(b.totalUsed, b.currency)} | ${this.fmtMoney(b.totalCharged, b.currency)} | ${b.giftBalance == null ? '-' : this.fmtMoney(b.giftBalance, b.currency)} | ${this.fmtTime(b.fetchedAt)} |`);
+    if (cache.hitRate != null || stats?.lastContextPercent) {
+      lines.push('');
+      lines.push('**补充**');
+      if (cache.hitRate != null) {
+        lines.push(`缓存命中：${cache.hitRate.toFixed(1)}%`);
+      }
+      if (stats?.lastContextPercent) {
+        lines.push(`上下文：${stats.lastContextPercent}% ${stats.lastModel}`);
       }
     }
-    lines.push('');
 
-    lines.push('### 缓存与近 24h');
-    lines.push('| 指标 | 值 |');
-    lines.push('|------|----|');
-    lines.push(`| 缓存命中 Token | ${this.fmtTokens(cache.hitTokens)} |`);
-    lines.push(`| 缓存未命中 Token | ${this.fmtTokens(cache.missTokens)} |`);
-    lines.push(`| 近 24h Token | ${this.fmtTokens(last24h.tokens)} |`);
-    lines.push(`| 近 24h 请求 | ${last24h.requests} |`);
     lines.push('');
-
-    lines.push('### 数据源健康');
-    lines.push('| 数据源 | 状态 | 最近信息 |');
-    lines.push('|--------|------|----------|');
-    lines.push(`| HTTP 拦截 | ${status.http.running ? '运行中' : '已关闭'} | 目标请求 ${status.http.seenRequests}，已解析 ${status.http.parsedUsages}，无 usage ${status.http.missingUsageResponses} |`);
-    lines.push(`| API 查询 | ${status.api.configured ? (status.api.lastError ? '异常' : '可用') : '未配置'} | ${status.api.lastError || `余额 ${this.fmtTime(status.api.lastBalanceAt)}，用量新增 ${status.api.lastEntryCount}`} |`);
-    lines.push(`| 本地扫描 | ${status.local.configured ? (status.local.lastError ? '异常' : '运行中') : '未配置'} | ${status.local.lastError || `扫描 ${this.fmtTime(status.local.lastScanAt)}，新增 ${status.local.lastEntryCount}`} |`);
+    lines.push('[打开用量面板](command:tokenLens.showDashboard)');
 
     md.appendMarkdown(lines.join('\n'));
     return md;
@@ -252,6 +249,11 @@ export class StatusBarManager {
   private fmtTime(ts: number): string {
     if (!ts) { return '从未'; }
     return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  private compactText(value: string): string {
+    const text = value.replace(/\s+/g, ' ').trim();
+    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
   }
 
   dispose(): void {

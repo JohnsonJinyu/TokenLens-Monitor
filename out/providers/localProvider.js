@@ -235,7 +235,7 @@ class LocalProvider extends base_1.BaseProvider {
                 }
             }
             catch (e) {
-                console.error(`[DeepSeek Monitor] 读取 ${p} 失败:`, e);
+                console.error(`[TokenLens] 读取 ${p} 失败:`, e);
             }
         }
         return allEntries;
@@ -353,7 +353,7 @@ class LocalProvider extends base_1.BaseProvider {
                 try {
                     if (fs.existsSync(c)) {
                         discovered.push(c);
-                        console.log(`[DeepSeek Monitor] 发现 ${tool.name} 数据: ${c}`);
+                        console.log(`[TokenLens] 发现 ${tool.name} 数据: ${c}`);
                         break;
                     }
                 }
@@ -369,7 +369,7 @@ class LocalProvider extends base_1.BaseProvider {
             try {
                 if (fs.existsSync(p) && !discovered.includes(p)) {
                     discovered.push(p);
-                    console.log(`[DeepSeek Monitor] 发现额外数据: ${p}`);
+                    console.log(`[TokenLens] 发现额外数据: ${p}`);
                 }
             }
             catch { /* skip */ }

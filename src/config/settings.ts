@@ -5,15 +5,16 @@
 import * as vscode from 'vscode';
 import type { ProviderConfig, ModelPricing } from '../providers/base';
 
-const SECTION = 'deepseekMonitor';
+const SECTION = 'tokenLens';
 
 // ---- API & Provider ----
 export function getApiKey(): string {
-  return vscode.workspace.getConfiguration(SECTION).get<string>('apiKey', '');
+  return vscode.workspace.getConfiguration(SECTION).get<string>('apiKey', '').trim();
 }
 
 export function getApiBase(): string {
-  return vscode.workspace.getConfiguration(SECTION).get<string>('apiBase', 'https://api.deepseek.com');
+  const value = vscode.workspace.getConfiguration(SECTION).get<string>('apiBase', 'https://api.deepseek.com').trim();
+  return value.replace(/\/+$/, '') || 'https://api.deepseek.com';
 }
 
 export function getProviders(): ProviderConfig[] {

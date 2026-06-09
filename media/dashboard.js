@@ -1,9 +1,10 @@
-// DeepSeek Monitor Dashboard
+// TokenLens Dashboard
 
 var vscode = typeof acquireVsCodeApi !== 'undefined' ? acquireVsCodeApi() : null;
 var gSnapshot = null;
 var gSettings = null;
 var gCurrentTab = 'monitor';
+var gTrendRange = '24h';
 var trendChart = null;
 var modelCostChart = null;
 
@@ -46,10 +47,16 @@ function renderDashboard() {
   safeRender('kpis', renderKpis);
   safeRender('health', renderHealth);
   safeRender('trend', renderTrend);
+  safeRender('heatmap', renderHeatmap);
   safeRender('modelCost', renderModelCost);
   safeRender('providers', renderProviderTable);
   safeRender('models', renderModelTable);
   safeRender('history', renderHistoryTable);
+}
+
+function setTrendRange(range) {
+  gTrendRange = range || '24h';
+  renderTrend(gSnapshot);
 }
 
 function renderHeader(snapshot) {
@@ -66,28 +73,22 @@ function renderKpis(snapshot) {
   var balance = snapshot.balanceSummary && snapshot.balanceSummary.primary;
   var cache = snapshot.cacheSummary || {};
   var ctx = stats.lastContextPercent || 0;
+  var balanceLines = [];
+  if (balance) {
+    balanceLines.push(['已用', fmtMoney(balance.totalUsed, balance.currency)]);
+    balanceLines.push(['充值', fmtMoney(balance.totalCharged, balance.currency)]);
+    if (balance.giftBalance && balance.giftBalance > 0) {
+      balanceLines.push(['赠送', fmtMoney(balance.giftBalance, balance.currency)]);
+    }
+  }
+
   var kpis = [
     {
       icon: '💳',
       label: '账户余额',
       value: balance ? fmtMoney(balance.balance, balance.currency) : '未查询',
       sub: balance ? '更新时间 ' + fmtTime(balance.fetchedAt) : '配置 API Key 后显示余额',
-      lines: balance ? [
-        ['已用', fmtMoney(balance.totalUsed, balance.currency)],
-        ['充值', fmtMoney(balance.totalCharged, balance.currency)]
-      ] : []
-    },
-    {
-      icon: '🧾',
-      label: '已用金额',
-      value: balance ? fmtMoney(balance.totalUsed, balance.currency) : '未查询',
-      sub: balance ? '充值 ' + fmtMoney(balance.totalCharged, balance.currency) : '等待余额接口返回'
-    },
-    {
-      icon: '🎁',
-      label: '赠送余额',
-      value: balance && balance.giftBalance != null ? fmtMoney(balance.giftBalance, balance.currency) : '未返回',
-      sub: balance ? balance.provider : '余额接口未返回赠送字段'
+      lines: balanceLines
     },
     {
       icon: '💰',
@@ -106,30 +107,39 @@ function renderKpis(snapshot) {
       label: '请求数',
       value: String(stats.totalRequests || 0),
       sub: '近 24h ' + (snapshot.last24h.requests || 0) + ' 次'
-    },
-    {
-      icon: '🎯',
-      label: '缓存命中率',
-      value: cache.hitRate == null ? '未返回' : fmtPercent(cache.hitRate),
-      sub: cache.totalTokens ? '命中 ' + fmtTokens(cache.hitTokens) + ' / 未命中 ' + fmtTokens(cache.missTokens) : '暂无缓存明细',
-      progress: cache.hitRate == null ? null : clamp(cache.hitRate, 0, 100),
-      tone: cache.hitRate == null ? '' : cache.hitRate >= 60 ? 'good' : cache.hitRate >= 25 ? 'warn' : 'bad'
-    },
-    {
-      icon: '💸',
-      label: '缓存节省估算',
-      value: cache.estimatedSavings == null ? '未估算' : fmtMoney(cache.estimatedSavings),
-      sub: cache.estimatedSavings == null ? '仅支持有缓存折扣定价的模型' : '按配置定价粗略估算'
-    },
-    {
-      icon: '📐',
-      label: '上下文占比',
-      value: ctx > 0 ? fmtPercent(ctx) : '未捕获',
-      sub: stats.lastModel ? stats.lastModel : '等待下一次请求',
-      progress: ctx > 0 ? clamp(ctx, 0, 100) : null,
-      tone: ctx >= 85 ? 'bad' : ctx >= 70 ? 'warn' : 'good'
     }
   ];
+
+  if (cache.hitRate != null) {
+    kpis.push({
+      icon: '🎯',
+      label: '缓存命中率',
+      value: fmtPercent(cache.hitRate),
+      sub: cache.totalTokens ? '命中 ' + fmtTokens(cache.hitTokens) + ' / 未命中 ' + fmtTokens(cache.missTokens) : '暂无缓存明细',
+      progress: clamp(cache.hitRate, 0, 100),
+      tone: cache.hitRate >= 60 ? 'good' : cache.hitRate >= 25 ? 'warn' : 'bad'
+    });
+  }
+
+  if (cache.estimatedSavings != null && cache.estimatedSavings > 0) {
+    kpis.push({
+      icon: '💸',
+      label: '缓存节省',
+      value: fmtMoney(cache.estimatedSavings),
+      sub: '按配置定价估算'
+    });
+  }
+
+  if (ctx > 0) {
+    kpis.push({
+      icon: '📐',
+      label: '上下文占比',
+      value: fmtPercent(ctx),
+      sub: stats.lastModel ? stats.lastModel : '等待下一次请求',
+      progress: clamp(ctx, 0, 100),
+      tone: ctx >= 85 ? 'bad' : ctx >= 70 ? 'warn' : 'good'
+    });
+  }
 
   var el = document.getElementById('kpi-grid');
   if (!el) return;
@@ -155,7 +165,7 @@ function renderHealth(snapshot) {
       state: http.running ? '运行中' : '已关闭',
       cls: http.running ? 'good' : 'bad',
       detail: http.seenRequests
-        ? '已看到 ' + http.seenRequests + ' 个目标请求，已解析 ' + http.parsedUsages + ' 条用量'
+        ? '目标请求 ' + http.seenRequests + ' 个，已解析 ' + http.parsedUsages + ' 条'
         : '等待 VS Code 扩展发出 LLM API 请求'
     },
     {
@@ -163,18 +173,21 @@ function renderHealth(snapshot) {
       state: api.configured ? (api.lastError ? '异常' : '可用') : '未配置',
       cls: api.configured ? (api.lastError ? 'bad' : 'good') : 'warn',
       detail: api.configured
-        ? (api.lastError || ('余额 ' + fmtTime(api.lastBalanceAt) + '，用量新增 ' + (api.lastEntryCount || 0) + ' 条'))
+        ? (formatApiDetail(api) || formatApiOkDetail(api))
         : '配置 API Key 后可查询余额和平台用量'
-    },
-    {
+    }
+  ];
+
+  if (local.configured || local.lastError || local.lastEntryCount) {
+    rows.push({
       name: '本地扫描',
       state: local.configured ? (local.lastError ? '异常' : '运行中') : '未配置',
       cls: local.configured ? (local.lastError ? 'bad' : 'good') : 'warn',
       detail: local.configured
         ? (local.lastError || ('最近扫描 ' + fmtTime(local.lastScanAt) + '，新增 ' + (local.lastEntryCount || 0) + ' 条'))
         : '可在设置中配置本地日志路径'
-    }
-  ];
+    });
+  }
 
   setText('health-meta', (snapshot.recentHistory || []).length ? '最近有请求记录' : '等待请求');
   var el = document.getElementById('health-list');
@@ -191,11 +204,34 @@ function renderHealth(snapshot) {
   }).join('');
 }
 
+function formatApiDetail(api) {
+  if (!api || !api.lastError) return '';
+  var text = String(api.lastError).replace(/\s+/g, ' ').trim();
+  if (text.indexOf('404') >= 0) {
+    return '平台用量接口不可用；余额仍可查询，用量依赖请求拦截';
+  }
+  return text.length > 96 ? text.slice(0, 93) + '...' : text;
+}
+
+function formatApiOkDetail(api) {
+  if (api.lastEntryCount > 0) {
+    return '余额 ' + fmtTime(api.lastBalanceAt) + '，用量新增 ' + api.lastEntryCount + ' 条';
+  }
+  if (api.lastBalanceAt) {
+    return '余额 ' + fmtTime(api.lastBalanceAt) + '，用量等待请求拦截';
+  }
+  return '等待余额接口返回';
+}
+
 function renderTrend(snapshot) {
-  var rows = snapshot.trend || [];
+  var ranges = snapshot.rangeTrends || {};
+  var rows = ranges[gTrendRange] || snapshot.trend || [];
   var hasData = rows.some(function (r) { return r.requests > 0 || r.tokens > 0 || r.cost > 0; });
   toggleChart('trend-wrap', 'trend-empty', hasData);
-  setText('trend-meta', hasData ? '请求 ' + snapshot.last24h.requests + ' 次' : '暂无数据');
+  setClass('range-5h', gTrendRange === '5h' ? 'active' : '');
+  setClass('range-24h', gTrendRange === '24h' ? 'active' : '');
+  setClass('range-7d', gTrendRange === '7d' ? 'active' : '');
+  setText('trend-meta', hasData ? getRangeSummary(rows) : '暂无数据');
   destroyChart('trend');
   if (!hasData || typeof Chart === 'undefined') return;
 
@@ -207,7 +243,7 @@ function renderTrend(snapshot) {
   trendChart = new Chart(ctx, {
     type: 'line',
     data: {
-      labels: rows.map(function (r) { return r.label + ':00'; }),
+      labels: rows.map(function (r) { return gTrendRange === '7d' ? r.label : r.label + ':00'; }),
       datasets: [
         {
           label: '费用',
@@ -228,19 +264,44 @@ function renderTrend(snapshot) {
           tension: 0.35,
           fill: false,
           yAxisID: 'tokens'
+        },
+        {
+          label: '请求',
+          data: rows.map(function (r) { return r.requests; }),
+          borderColor: cssVar('--chart-c'),
+          backgroundColor: 'rgba(217, 164, 65, 0.12)',
+          borderWidth: 2,
+          tension: 0.35,
+          fill: false,
+          yAxisID: 'requests'
         }
       ]
     },
     options: chartOptions({
       cost: { position: 'left', ticks: { callback: function (v) { return fmtMoney(v); } } },
-      tokens: { position: 'right', grid: { drawOnChartArea: false }, ticks: { callback: function (v) { return fmtTokens(v); } } }
-    })
+      tokens: { position: 'right', grid: { drawOnChartArea: false }, ticks: { callback: function (v) { return fmtTokens(v); } } },
+      requests: { display: false, beginAtZero: true }
+    }, trendTooltipCallbacks(rows))
   });
+}
+
+function renderHeatmap(snapshot) {
+  var days = snapshot.dailyHeatmap || [];
+  var hasData = days.some(function (d) { return d.requests > 0 || d.tokens > 0 || d.cost > 0; });
+  setClass('heatmap-section', hasData ? 'panel' : 'hidden');
+  setText('heatmap-meta', hasData ? '近 30 天' : '');
+  var el = document.getElementById('usage-heatmap');
+  if (!el || !hasData) return;
+  el.innerHTML = days.map(function (d) {
+    var title = d.date + ' · ' + fmtMoney(d.cost) + ' · ' + fmtTokens(d.tokens) + ' tokens · ' + d.requests + ' 次';
+    return '<div class="heat-cell l' + clamp(d.level, 0, 4) + '" title="' + escAttr(title) + '" aria-label="' + escAttr(title) + '"></div>';
+  }).join('');
 }
 
 function renderModelCost(snapshot) {
   var rows = (snapshot.modelRows || []).filter(function (r) { return r.cost > 0 || r.totalTokens > 0; }).slice(0, 8);
   var hasData = rows.length > 0;
+  setClass('model-chart-section', hasData ? 'panel' : 'hidden');
   toggleChart('model-chart-wrap', 'model-chart-empty', hasData);
   setText('model-chart-meta', hasData ? rows.length + ' 个模型' : '暂无数据');
   destroyChart('model');
@@ -255,29 +316,54 @@ function renderModelCost(snapshot) {
     type: 'bar',
     data: {
       labels: rows.map(function (r) { return r.model; }),
-      datasets: [{
-        label: '费用',
-        data: rows.map(function (r) { return round(r.cost, 6); }),
-        backgroundColor: rows.map(function (_, i) {
-          return [cssVar('--chart-a'), cssVar('--chart-b'), cssVar('--chart-c'), cssVar('--chart-d')][i % 4];
-        }),
-        borderRadius: 5,
-        borderSkipped: false
-      }]
+      datasets: [
+        {
+          label: '费用',
+          data: rows.map(function (r) { return round(r.cost, 6); }),
+          backgroundColor: rows.map(function (_, i) {
+            return [cssVar('--chart-a'), cssVar('--chart-b'), cssVar('--chart-c'), cssVar('--chart-d')][i % 4];
+          }),
+          borderRadius: 5,
+          borderSkipped: false,
+          xAxisID: 'cost'
+        },
+        {
+          label: 'Tokens',
+          data: rows.map(function (r) { return r.totalTokens || 0; }),
+          backgroundColor: 'rgba(53, 196, 106, 0.28)',
+          borderRadius: 5,
+          borderSkipped: false,
+          xAxisID: 'tokens'
+        }
+      ]
     },
     options: chartOptions({
-      y: { beginAtZero: true, ticks: { callback: function (v) { return fmtMoney(v); } } }
-    })
+      cost: { beginAtZero: true, position: 'bottom', ticks: { callback: function (v) { return fmtMoney(v); } } },
+      tokens: { beginAtZero: true, position: 'top', grid: { drawOnChartArea: false }, ticks: { callback: function (v) { return fmtTokens(v); } } },
+      y: { ticks: { color: cssVar('--muted'), font: { size: 10 } } }
+    }, modelTooltipCallbacks(rows), 'y')
   });
 }
 
 function renderProviderTable(snapshot) {
   var rows = snapshot.providerRows || [];
-  setText('provider-meta', rows.length ? rows.length + ' 个服务商' : '暂无服务商数据');
+  var hasUsage = rows.some(function (r) { return r.requests > 0 || r.totalTokens > 0 || r.cost > 0; });
+  setClass('provider-section', rows.length ? 'panel' : 'hidden');
+  setText('provider-meta', rows.length ? rows.length + ' 个服务商' : '');
   var el = document.getElementById('provider-table');
   if (!el) return;
   if (!rows.length) {
-    el.innerHTML = '<div class="empty">暂无服务商数据。配置 API Key 或捕获请求后会显示余额和用量。</div>';
+    el.innerHTML = '';
+    return;
+  }
+  if (rows.length === 1 && !hasUsage) {
+    var only = rows[0];
+    var onlyBalance = only.balance ? fmtMoney(only.balance.balance, only.balance.currency) : '未查询';
+    el.innerHTML = '<div class="compact-row">'
+      + '<div class="compact-title">' + escHtml(only.name) + '</div>'
+      + '<div class="compact-meta">余额 ' + escHtml(onlyBalance) + '</div>'
+      + '<div class="compact-meta">暂无用量</div>'
+      + '</div>';
     return;
   }
   el.innerHTML = '<table><thead><tr>'
@@ -299,11 +385,13 @@ function renderProviderTable(snapshot) {
 
 function renderModelTable(snapshot) {
   var rows = snapshot.modelRows || [];
-  setText('model-meta', rows.length ? rows.length + ' 个模型' : '暂无模型');
+  var hasData = rows.length > 0;
+  setClass('model-section', hasData ? 'panel' : 'hidden');
+  setText('model-meta', hasData ? rows.length + ' 个模型' : '');
   var el = document.getElementById('model-table');
   if (!el) return;
-  if (!rows.length) {
-    el.innerHTML = '<div class="empty">暂无模型用量。捕获到请求后会显示排行。</div>';
+  if (!hasData) {
+    el.innerHTML = '';
     return;
   }
   el.innerHTML = '<table><thead><tr>'
@@ -327,11 +415,13 @@ function renderModelTable(snapshot) {
 
 function renderHistoryTable(snapshot) {
   var rows = snapshot.recentHistory || [];
-  setText('history-meta', rows.length ? '最近 ' + rows.length + ' 条' : '暂无请求');
+  var hasData = rows.length > 0;
+  setClass('history-section', hasData ? 'panel' : 'hidden');
+  setText('history-meta', hasData ? '最近 ' + rows.length + ' 条' : '');
   var el = document.getElementById('history-table');
   if (!el) return;
-  if (!rows.length) {
-    el.innerHTML = '<div class="empty">暂无最近请求。发起一次 LLM 调用后，这里会显示时间、模型、Token 和费用。</div>';
+  if (!hasData) {
+    el.innerHTML = '';
     return;
   }
   el.innerHTML = '<table><thead><tr>'
@@ -452,6 +542,12 @@ function normalizeSnapshot(raw) {
   snapshot.modelRows = Array.isArray(snapshot.modelRows) ? snapshot.modelRows : [];
   snapshot.recentHistory = Array.isArray(snapshot.recentHistory) ? snapshot.recentHistory : [];
   snapshot.trend = Array.isArray(snapshot.trend) ? snapshot.trend : [];
+  snapshot.rangeTrends = Object.assign({
+    '5h': [],
+    '24h': snapshot.trend,
+    '7d': []
+  }, snapshot.rangeTrends || {});
+  snapshot.dailyHeatmap = Array.isArray(snapshot.dailyHeatmap) ? snapshot.dailyHeatmap : [];
   snapshot.generatedAt = snapshot.generatedAt || Date.now();
   return snapshot;
 }
@@ -460,7 +556,7 @@ function safeRender(name, fn) {
   try {
     fn(gSnapshot);
   } catch (err) {
-    console.error('[DeepSeek Monitor] render failed:', name, err);
+    console.error('[TokenLens] render failed:', name, err);
     renderFallback(name);
   }
 }
@@ -471,7 +567,8 @@ function renderFallback(name) {
     health: 'health-list',
     providers: 'provider-table',
     models: 'model-table',
-    history: 'history-table'
+    history: 'history-table',
+    heatmap: 'usage-heatmap'
   };
   var id = map[name];
   if (!id) return;
@@ -503,20 +600,63 @@ function getOverallStatus(snapshot) {
   return { cls: 'bad', label: '拦截关闭' };
 }
 
-function chartOptions(scales) {
+function getRangeSummary(rows) {
+  var sum = rows.reduce(function (acc, r) {
+    acc.cost += r.cost || 0;
+    acc.tokens += r.tokens || 0;
+    acc.requests += r.requests || 0;
+    return acc;
+  }, { cost: 0, tokens: 0, requests: 0 });
+  return fmtMoney(sum.cost) + ' · ' + fmtTokens(sum.tokens) + ' · ' + sum.requests + ' 次';
+}
+
+function trendTooltipCallbacks(rows) {
   return {
+    callbacks: {
+      afterBody: function (items) {
+        var i = items && items.length ? items[0].dataIndex : -1;
+        var row = rows[i] || {};
+        return [
+          '费用 ' + fmtMoney(row.cost || 0),
+          'Token ' + fmtTokens(row.tokens || 0),
+          '请求 ' + (row.requests || 0) + ' 次'
+        ];
+      }
+    }
+  };
+}
+
+function modelTooltipCallbacks(rows) {
+  return {
+    callbacks: {
+      afterBody: function (items) {
+        var i = items && items.length ? items[0].dataIndex : -1;
+        var row = rows[i] || {};
+        return [
+          '费用 ' + fmtMoney(row.cost || 0),
+          'Token ' + fmtTokens(row.totalTokens || 0),
+          '请求 ' + (row.requests || 0) + ' 次'
+        ];
+      }
+    }
+  };
+}
+
+function chartOptions(scales, tooltipOptions, indexAxis) {
+  return {
+    indexAxis: indexAxis || 'x',
     responsive: true,
     maintainAspectRatio: false,
     animation: { duration: 250 },
     plugins: {
       legend: { labels: { color: cssVar('--muted'), boxWidth: 10, font: { size: 10 } } },
-      tooltip: {
+      tooltip: Object.assign({
         backgroundColor: cssVar('--panel'),
         titleColor: cssVar('--fg'),
         bodyColor: cssVar('--muted'),
         borderColor: cssVar('--border'),
         borderWidth: 1
-      }
+      }, tooltipOptions || {})
     },
     scales: Object.assign({
       x: {

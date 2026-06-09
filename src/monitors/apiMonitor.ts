@@ -27,15 +27,16 @@ export class ApiMonitor {
   /** 启动 API 监控（定时轮询） */
   start(providers: BaseProvider[]): void {
     if (this.running) {return;}
-    this.running = true;
-    this.apiKey = getApiKey();
+    this.syncApiKey();
     this.lastError = '';
 
     if (!this.apiKey || providers.length === 0) {
-      console.log('[DeepSeek Monitor] API 监控未启动：缺少 API Key 或没有 API 提供商');
+      console.log('[TokenLens] API 监控未启动：缺少 API Key 或没有 API 提供商');
+      this.lastError = !this.apiKey ? 'API Key 未配置' : '没有 API 提供商';
       return;
     }
 
+    this.running = true;
     const intervalMinutes = getBalanceCheckInterval();
     const intervalMs = intervalMinutes * 60 * 1000;
 
@@ -53,7 +54,7 @@ export class ApiMonitor {
       this.pollUsage(providers);
     }, 30000);
 
-    console.log(`[DeepSeek Monitor] API 监控已启动，余额查询间隔: ${intervalMinutes} 分钟`);
+    console.log(`[TokenLens] API 监控已启动，余额查询间隔: ${intervalMinutes} 分钟`);
   }
 
   /** 停止 API 监控 */
@@ -61,27 +62,42 @@ export class ApiMonitor {
     this.running = false;
     if (this.balanceInterval) {clearInterval(this.balanceInterval); this.balanceInterval = null;}
     if (this.usageInterval) {clearInterval(this.usageInterval); this.usageInterval = null;}
-    console.log('[DeepSeek Monitor] API 监控已停止');
+    console.log('[TokenLens] API 监控已停止');
   }
 
   /** 轮询余额 */
   private async pollBalance(providers: BaseProvider[]): Promise<void> {
+    this.syncApiKey();
+    if (!this.apiKey) {
+      this.lastError = 'API Key 未配置';
+      return;
+    }
+
     for (const provider of providers) {
       try {
         const balance = await provider.fetchBalance(this.apiKey);
         if (balance) {
           this.tracker.updateBalance(provider.id, balance);
           this.lastBalanceAt = Date.now();
+          this.lastError = '';
+        } else {
+          this.lastError = '余额接口未返回可用余额';
         }
       } catch (e) {
         this.lastError = e instanceof Error ? e.message : String(e);
-        console.error(`[DeepSeek Monitor] ${provider.id} 余额查询失败:`, e);
+        console.error(`[TokenLens] ${provider.id} 余额查询失败:`, e);
       }
     }
   }
 
   /** 轮询用量 */
   private async pollUsage(providers: BaseProvider[]): Promise<void> {
+    this.syncApiKey();
+    if (!this.apiKey) {
+      this.lastError = 'API Key 未配置';
+      return;
+    }
+
     for (const provider of providers) {
       try {
         const entries = await provider.fetchRecentUsage(this.apiKey, 1);
@@ -98,9 +114,10 @@ export class ApiMonitor {
         }
         this.lastUsageAt = Date.now();
         this.lastEntryCount = newEntries.length;
+        this.lastError = '';
       } catch (e) {
         this.lastError = e instanceof Error ? e.message : String(e);
-        console.error(`[DeepSeek Monitor] ${provider.id} 用量查询失败:`, e);
+        console.error(`[TokenLens] ${provider.id} 用量查询失败:`, e);
       }
     }
 
@@ -113,6 +130,7 @@ export class ApiMonitor {
 
   /** 手动刷新全部 */
   async refreshAll(providers: BaseProvider[]): Promise<void> {
+    this.syncApiKey();
     await Promise.all([
       this.pollBalance(providers),
       this.pollUsage(providers),
@@ -133,11 +151,15 @@ export class ApiMonitor {
   } {
     return {
       running: this.running,
-      configured: !!this.apiKey,
+      configured: !!getApiKey(),
       lastBalanceAt: this.lastBalanceAt,
       lastUsageAt: this.lastUsageAt,
       lastError: this.lastError,
       lastEntryCount: this.lastEntryCount,
     };
+  }
+
+  private syncApiKey(): void {
+    this.apiKey = getApiKey();
   }
 }

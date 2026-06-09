@@ -112,7 +112,7 @@ export function startInterception(opts: {
   };
 
   interceptEnabled = true;
-  console.log('[DeepSeek Monitor] 🔍 HTTP 拦截器已启动');
+  console.log('[TokenLens] 🔍 HTTP 拦截器已启动');
 }
 
 export function stopInterception(): void {
@@ -128,7 +128,7 @@ export function stopInterception(): void {
   interceptEnabled = false;
   onUsageDetected = null;
   seenFingerprints.clear();
-  console.log('[DeepSeek Monitor] 🔍 HTTP 拦截器已停止');
+  console.log('[TokenLens] 🔍 HTTP 拦截器已停止');
 }
 
 export function isIntercepting(): boolean {
@@ -428,6 +428,6 @@ function processEntry(entry: UsageEntry): void {
   try {
     onUsageDetected(entry);
   } catch (e) {
-    console.error('[DeepSeek Monitor] 用量回调异常:', e);
+    console.error('[TokenLens] 用量回调异常:', e);
   }
 }

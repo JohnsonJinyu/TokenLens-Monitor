@@ -1,6 +1,6 @@
 "use strict";
 /**
- * DeepSeek Monitor — VSCode 扩展入口
+ * TokenLens — VSCode 扩展入口
  *
  * 三种数据来源（优先级从高到低）：
  *  1. HTTP 拦截 — Monkey-patch https.request，自动捕获所有 LLM API 请求
@@ -64,7 +64,7 @@ let localMonitor;
 let statusBar;
 let dashboardProvider;
 function activate(context) {
-    console.log('[DeepSeek Monitor] 🚀 正在启动...');
+    console.log('[TokenLens] 🚀 正在启动...');
     // ---- 🔥 状态栏最先创建（确保无论如何都显示）----
     try {
         storage = new storage_1.StorageManager(context, (0, settings_1.getMaxLogEntries)());
@@ -88,16 +88,16 @@ function activate(context) {
             },
         }));
         context.subscriptions.push(statusBar);
-        console.log('[DeepSeek Monitor] ✅ StatusBar 已创建');
+        console.log('[TokenLens] ✅ StatusBar 已创建');
     }
     catch (e) {
-        console.error('[DeepSeek Monitor] ❌ StatusBar 创建失败:', e);
+        console.error('[TokenLens] ❌ StatusBar 创建失败:', e);
         // 兜底：创建一个极简状态栏
         try {
             const fallback = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
             fallback.text = '$(pulse) ¥0';
-            fallback.tooltip = 'DeepSeek Monitor';
-            fallback.command = 'deepseekMonitor.showDashboard';
+            fallback.tooltip = 'TokenLens';
+            fallback.command = 'tokenLens.showDashboard';
             fallback.show();
             statusBar = fallback;
             context.subscriptions.push(statusBar);
@@ -109,7 +109,7 @@ function activate(context) {
         initProviders();
     }
     catch (e) {
-        console.error('[DeepSeek Monitor] ❌ Provider 初始化失败:', e);
+        console.error('[TokenLens] ❌ Provider 初始化失败:', e);
     }
     // ---- HTTP 拦截器 ----
     try {
@@ -119,11 +119,11 @@ function activate(context) {
                     tracker.recordUsage([entry]);
                 },
             });
-            console.log('[DeepSeek Monitor] ✅ HTTP 拦截器已启动');
+            console.log('[TokenLens] ✅ HTTP 拦截器已启动');
         }
     }
     catch (e) {
-        console.error('[DeepSeek Monitor] ❌ 拦截器启动失败:', e);
+        console.error('[TokenLens] ❌ 拦截器启动失败:', e);
     }
     // ---- Monitors ----
     try {
@@ -132,33 +132,33 @@ function activate(context) {
         // 立即扫描本地历史
         const localProviders = registry_1.registry.getLocalProviders();
         if (localProviders.length > 0) {
-            console.log(`[DeepSeek Monitor] 发现 ${localProviders.length} 个本地数据源，立即扫描...`);
+            console.log(`[TokenLens] 发现 ${localProviders.length} 个本地数据源，立即扫描...`);
             localMonitor.forceScanAll(localProviders).catch((e) => {
-                console.error('[DeepSeek Monitor] 初始扫描失败:', e);
+                console.error('[TokenLens] 初始扫描失败:', e);
             });
         }
         // 🔥 有 API Key 时立即拉取余额和近期用量
         const apiProviders = registry_1.registry.getApiProviders();
         const apiKey = (0, settings_1.getApiKey)();
         if (apiKey && apiProviders.length > 0) {
-            console.log('[DeepSeek Monitor] 检测到 API Key，立即拉取余额和用量...');
+            console.log('[TokenLens] 检测到 API Key，立即拉取余额...');
             apiMonitor.refreshAll(apiProviders).then(() => {
                 const stats = tracker.getStats();
-                console.log(`[DeepSeek Monitor] 初始拉取完成: ${stats.totalRequests} 条记录`);
+                console.log(`[TokenLens] 初始拉取完成: ${stats.totalRequests} 条记录`);
                 // 检查余额
                 for (const [, ps] of stats.byProvider) {
                     if (ps.balance) {
-                        console.log(`[DeepSeek Monitor] ${ps.provider} 余额: ${ps.balance.balance} ${ps.balance.currency}`);
+                        console.log(`[TokenLens] ${ps.provider} 余额: ${ps.balance.balance} ${ps.balance.currency}`);
                     }
                 }
             }).catch((e) => {
-                console.error('[DeepSeek Monitor] 初始 API 拉取失败:', e);
-                vscode.window.showWarningMessage('⚠️ DeepSeek Monitor: API 余额查询失败，请检查 API Key 和网络');
+                console.error('[TokenLens] 初始 API 拉取失败:', e);
+                vscode.window.showWarningMessage('⚠️ TokenLens: API 余额查询失败，请检查 API Key 和网络');
             });
         }
     }
     catch (e) {
-        console.error('[DeepSeek Monitor] ❌ 监控器初始化失败:', e);
+        console.error('[TokenLens] ❌ 监控器初始化失败:', e);
     }
     // ---- Dashboard Webview ----
     dashboardProvider = new dashboardPanel_1.DashboardPanel(tracker, storage, context.extensionUri, () => ({
@@ -179,11 +179,11 @@ function activate(context) {
             lastEntryCount: 0,
         },
     }));
-    context.subscriptions.push(vscode.window.registerWebviewViewProvider('deepseekMonitor.dashboard', dashboardProvider));
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider('tokenLens.dashboard', dashboardProvider));
     // ---- Commands ----
-    context.subscriptions.push(vscode.commands.registerCommand('deepseekMonitor.showDashboard', () => {
-        vscode.commands.executeCommand('workbench.view.extension.deepseek-monitor-sidebar');
-    }), vscode.commands.registerCommand('deepseekMonitor.refreshBalance', async () => {
+    context.subscriptions.push(vscode.commands.registerCommand('tokenLens.showDashboard', () => {
+        vscode.commands.executeCommand('workbench.view.extension.tokenlens-monitor-sidebar');
+    }), vscode.commands.registerCommand('tokenLens.refreshBalance', async () => {
         const providers = registry_1.registry.getApiProviders();
         if (providers.length === 0) {
             vscode.window.showWarningMessage('没有配置 API 提供商');
@@ -194,19 +194,19 @@ function activate(context) {
             await localMonitor.forceScanAll(registry_1.registry.getLocalProviders());
         });
         vscode.window.showInformationMessage('✅ 余额和用量已刷新');
-    }), vscode.commands.registerCommand('deepseekMonitor.toggleMonitor', () => {
+    }), vscode.commands.registerCommand('tokenLens.toggleMonitor', () => {
         if (apiMonitor.isRunning) {
             stopAllMonitors();
-            vscode.window.showInformationMessage('⏸ DeepSeek Monitor 已暂停');
+            vscode.window.showInformationMessage('⏸ TokenLens 已暂停');
         }
         else {
             startAllMonitors();
-            vscode.window.showInformationMessage('▶ DeepSeek Monitor 已恢复');
+            vscode.window.showInformationMessage('▶ TokenLens 已恢复');
         }
-    }), vscode.commands.registerCommand('deepseekMonitor.resetSession', () => {
+    }), vscode.commands.registerCommand('tokenLens.resetSession', () => {
         tracker.resetSession();
         vscode.window.showInformationMessage('🗑 会话统计已重置');
-    }), vscode.commands.registerCommand('deepseekMonitor.exportReport', async () => {
+    }), vscode.commands.registerCommand('tokenLens.exportReport', async () => {
         await exportReport();
     }));
     // ---- 自动启动 ----
@@ -215,8 +215,8 @@ function activate(context) {
     }
     // ---- 监听配置变更 ----
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('deepseekMonitor')) {
-            console.log('[DeepSeek Monitor] 配置变更，重新初始化...');
+        if (e.affectsConfiguration('tokenLens')) {
+            console.log('[TokenLens] 配置变更，重新初始化...');
             initProviders();
             // 重启监控
             stopAllMonitors();
@@ -236,36 +236,41 @@ function activate(context) {
             }
         }
     }));
-    console.log('[DeepSeek Monitor] ✅ 启动完成');
+    console.log('[TokenLens] ✅ 启动完成');
 }
 function deactivate() {
     stopAllMonitors();
     interceptor.stopInterception();
     statusBar?.dispose();
     statusBar = undefined;
-    console.log('[DeepSeek Monitor] 👋 已停止');
+    console.log('[TokenLens] 👋 已停止');
 }
 // ---- 内部函数 ----
 function initProviders() {
     registry_1.registry.clear();
     const apiKey = (0, settings_1.getApiKey)();
+    const apiBase = (0, settings_1.getApiBase)();
     const providers = (0, settings_1.getProviders)();
     const pricing = (0, settings_1.getPricing)();
     const localPaths = (0, settings_1.getLocalMonitorPaths)();
     // 注册用户配置的提供商
     for (const config of providers) {
-        if (config.type === 'api' && apiKey && !config.apiKey) {
-            config.apiKey = apiKey;
+        const nextConfig = { ...config };
+        if (nextConfig.name === 'DeepSeek') {
+            nextConfig.apiBase = apiBase;
         }
-        if (config.type === 'local' && localPaths.length > 0) {
-            config.localPaths = [...(config.localPaths ?? []), ...localPaths];
+        if (nextConfig.type === 'api' && apiKey && !nextConfig.apiKey) {
+            nextConfig.apiKey = apiKey;
         }
-        const provider = registry_1.registry.register(config);
+        if (nextConfig.type === 'local' && localPaths.length > 0) {
+            nextConfig.localPaths = [...(nextConfig.localPaths ?? []), ...localPaths];
+        }
+        const provider = registry_1.registry.register(nextConfig);
         (0, settings_1.applyPricing)(pricing, (model, p) => provider.setPricing(model, p));
     }
     // 无配置时使用默认值
     if (registry_1.registry.count === 0) {
-        registry_1.registry.initDefaults(apiKey);
+        registry_1.registry.initDefaults(apiKey, apiBase);
         for (const provider of registry_1.registry.getAll()) {
             (0, settings_1.applyPricing)(pricing, (model, p) => provider.setPricing(model, p));
         }
@@ -296,7 +301,7 @@ async function exportReport() {
     const stats = tracker.getStats();
     const history = storage.getUsageHistory();
     const lines = [];
-    lines.push('# DeepSeek Monitor — 用量报告');
+    lines.push('# TokenLens — 用量报告');
     lines.push(`> 导出时间: ${new Date().toISOString()}`);
     lines.push('');
     lines.push('## 概览');
@@ -324,7 +329,7 @@ async function exportReport() {
     const content = lines.join('\n');
     // 保存到文件
     const uri = await vscode.window.showSaveDialog({
-        defaultUri: vscode.Uri.file('deepseek-monitor-report.md'),
+        defaultUri: vscode.Uri.file('tokenlens-report.md'),
         filters: { 'Markdown': ['md'], 'CSV': ['csv'], 'All Files': ['*'] },
     });
     if (uri) {

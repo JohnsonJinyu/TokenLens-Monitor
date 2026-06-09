@@ -124,7 +124,7 @@ export class OpenAICompatProvider extends BaseProvider {
         endpoint: '/v1/chat/completions',
       }));
     } catch (e) {
-      console.error(`[DeepSeek Monitor] 获取 ${this.config.name} 用量失败:`, e);
+      console.error(`[TokenLens] 获取 ${this.config.name} 用量失败:`, e);
       return [];
     }
   }

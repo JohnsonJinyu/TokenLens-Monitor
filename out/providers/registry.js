@@ -71,12 +71,12 @@ class ProviderRegistry {
         this.notify();
     }
     /** 初始化默认识别 DeepSeek */
-    initDefaults(apiKey) {
+    initDefaults(apiKey, apiBase = 'https://api.deepseek.com') {
         // DeepSeek API 提供
         this.register({
             name: 'DeepSeek',
             type: 'api',
-            apiBase: 'https://api.deepseek.com',
+            apiBase,
             apiKey,
             models: ['deepseek-chat', 'deepseek-reasoner'],
         });

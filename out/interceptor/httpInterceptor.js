@@ -93,7 +93,7 @@ function startInterception(opts) {
         return req;
     };
     interceptEnabled = true;
-    console.log('[DeepSeek Monitor] 🔍 HTTP 拦截器已启动');
+    console.log('[TokenLens] 🔍 HTTP 拦截器已启动');
 }
 function stopInterception() {
     if (!interceptEnabled) {
@@ -109,7 +109,7 @@ function stopInterception() {
     interceptEnabled = false;
     onUsageDetected = null;
     seenFingerprints.clear();
-    console.log('[DeepSeek Monitor] 🔍 HTTP 拦截器已停止');
+    console.log('[TokenLens] 🔍 HTTP 拦截器已停止');
 }
 function isIntercepting() {
     return interceptEnabled;
@@ -364,7 +364,7 @@ function processEntry(entry) {
         onUsageDetected(entry);
     }
     catch (e) {
-        console.error('[DeepSeek Monitor] 用量回调异常:', e);
+        console.error('[TokenLens] 用量回调异常:', e);
     }
 }
 //# sourceMappingURL=httpInterceptor.js.map

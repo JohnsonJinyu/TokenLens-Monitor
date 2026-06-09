@@ -32,7 +32,7 @@ export class LocalMonitor {
     const localProviders = providers.filter((p) => p.config.type === 'local');
     this.configured = localProviders.length > 0;
     if (localProviders.length === 0) {
-      console.log('[DeepSeek Monitor] 本地监控未启动：没有本地提供商');
+      console.log('[TokenLens] 本地监控未启动：没有本地提供商');
       return;
     }
 
@@ -44,14 +44,14 @@ export class LocalMonitor {
       this.scanAll(localProviders);
     }, 60000);
 
-    console.log('[DeepSeek Monitor] 本地监控已启动，扫描间隔: 60 秒');
+    console.log('[TokenLens] 本地监控已启动，扫描间隔: 60 秒');
   }
 
   /** 停止本地监控 */
   stop(): void {
     this.running = false;
     if (this.scanInterval) {clearInterval(this.scanInterval); this.scanInterval = null;}
-    console.log('[DeepSeek Monitor] 本地监控已停止');
+    console.log('[TokenLens] 本地监控已停止');
   }
 
   /** 扫描所有本地提供商 */
@@ -73,7 +73,7 @@ export class LocalMonitor {
         }
       } catch (e) {
         this.lastError = e instanceof Error ? e.message : String(e);
-        console.error(`[DeepSeek Monitor] ${provider.id} 本地扫描失败:`, e);
+        console.error(`[TokenLens] ${provider.id} 本地扫描失败:`, e);
       }
     }
   }

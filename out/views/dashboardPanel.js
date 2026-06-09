@@ -40,7 +40,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DashboardPanel = void 0;
 const vscode = __importStar(require("vscode"));
 const settings_1 = require("../config/settings");
-const SECTION = 'deepseekMonitor';
+const SECTION = 'tokenLens';
 class DashboardPanel {
     constructor(tracker, storage, extensionUri, getMonitorStatus) {
         this.tracker = tracker;
@@ -66,13 +66,13 @@ class DashboardPanel {
                     this.postSettings();
                     break;
                 case 'refresh':
-                    vscode.commands.executeCommand('deepseekMonitor.refreshBalance');
+                    vscode.commands.executeCommand('tokenLens.refreshBalance');
                     break;
                 case 'reset':
-                    vscode.commands.executeCommand('deepseekMonitor.resetSession');
+                    vscode.commands.executeCommand('tokenLens.resetSession');
                     break;
                 case 'export':
-                    vscode.commands.executeCommand('deepseekMonitor.exportReport');
+                    vscode.commands.executeCommand('tokenLens.exportReport');
                     break;
                 case 'saveSetting':
                     this.saveSetting(msg.key, msg.value);
@@ -91,7 +91,7 @@ class DashboardPanel {
             this.postSnapshot(this.tracker.getStats());
         }, (err) => {
             this._view?.webview.postMessage({ type: 'settingSaved', key, success: false, error: String(err) });
-            vscode.window.showErrorMessage(`DeepSeek Monitor 设置保存失败: ${err}`);
+            vscode.window.showErrorMessage(`TokenLens 设置保存失败: ${err}`);
         });
     }
     postSettings() {
@@ -173,13 +173,16 @@ class DashboardPanel {
         }, { requests: 0, tokens: 0, cost: 0, cacheHitTokens: 0, cacheMissTokens: 0 });
         const balanceSummary = this.buildBalanceSummary(providerRows);
         const cacheSummary = this.buildCacheSummary(modelRows);
+        const rangeTrends = this.buildRangeTrends(history, now);
         return {
             generatedAt: now,
             stats: this.serializeStats(stats),
             recentHistory,
             providerRows,
             modelRows,
-            trend: this.buildTrend(history, now),
+            trend: rangeTrends['24h'],
+            rangeTrends,
+            dailyHeatmap: this.buildDailyHeatmap(history, now),
             last24h,
             balanceSummary,
             cacheSummary,
@@ -203,12 +206,25 @@ class DashboardPanel {
             lastModel: stats.lastModel || '',
         };
     }
-    buildTrend(history, now) {
-        const start = now - 23 * 60 * 60 * 1000;
+    buildRangeTrends(history, now) {
+        return {
+            '5h': this.buildTrend(history, now, 5, 'hour'),
+            '24h': this.buildTrend(history, now, 24, 'hour'),
+            '7d': this.buildTrend(history, now, 7, 'day'),
+        };
+    }
+    buildTrend(history, now, count, unit) {
+        const step = unit === 'hour' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+        const start = now - (count - 1) * step;
         const buckets = new Map();
-        for (let i = 0; i < 24; i++) {
-            const d = new Date(start + i * 60 * 60 * 1000);
-            d.setMinutes(0, 0, 0);
+        for (let i = 0; i < count; i++) {
+            const d = new Date(start + i * step);
+            if (unit === 'hour') {
+                d.setMinutes(0, 0, 0);
+            }
+            else {
+                d.setHours(0, 0, 0, 0);
+            }
             buckets.set(d.getTime(), { cost: 0, tokens: 0, requests: 0 });
         }
         for (const entry of history) {
@@ -216,7 +232,12 @@ class DashboardPanel {
                 continue;
             }
             const d = new Date(entry.timestamp);
-            d.setMinutes(0, 0, 0);
+            if (unit === 'hour') {
+                d.setMinutes(0, 0, 0);
+            }
+            else {
+                d.setHours(0, 0, 0, 0);
+            }
             const bucket = buckets.get(d.getTime());
             if (!bucket) {
                 continue;
@@ -226,9 +247,46 @@ class DashboardPanel {
             bucket.requests += 1;
         }
         return Array.from(buckets.entries()).map(([time, value]) => ({
-            label: new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', hour12: false }),
+            label: unit === 'hour'
+                ? new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', hour12: false })
+                : new Date(time).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }),
             ...value,
         }));
+    }
+    buildDailyHeatmap(history, now) {
+        const days = [];
+        const today = new Date(now);
+        today.setHours(0, 0, 0, 0);
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+            days.push({ date: d, cost: 0, tokens: 0, requests: 0 });
+        }
+        const byDate = new Map(days.map((d) => [d.date.toISOString().slice(0, 10), d]));
+        for (const entry of history) {
+            const d = new Date(entry.timestamp);
+            d.setHours(0, 0, 0, 0);
+            const key = d.toISOString().slice(0, 10);
+            const bucket = byDate.get(key);
+            if (!bucket) {
+                continue;
+            }
+            bucket.cost += entry.cost;
+            bucket.tokens += entry.promptTokens + entry.completionTokens;
+            bucket.requests += 1;
+        }
+        const maxCost = Math.max(...days.map((d) => d.cost), 0);
+        const maxTokens = Math.max(...days.map((d) => d.tokens), 0);
+        return days.map((d) => {
+            const intensity = maxCost > 0 ? d.cost / maxCost : (maxTokens > 0 ? d.tokens / maxTokens : 0);
+            return {
+                date: d.date.toISOString().slice(0, 10),
+                label: d.date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }),
+                cost: d.cost,
+                tokens: d.tokens,
+                requests: d.requests,
+                level: d.requests === 0 ? 0 : Math.max(1, Math.min(4, Math.ceil(intensity * 4))),
+            };
+        });
     }
     buildBalanceSummary(providerRows) {
         const providers = [];
@@ -304,7 +362,7 @@ class DashboardPanel {
                  script-src 'unsafe-inline' ${csp};
                  font-src ${csp};
                  img-src ${csp} data:;">
-  <title>DeepSeek Monitor</title>
+  <title>TokenLens</title>
   <style>
     :root {
       --bg: var(--vscode-editor-background, #111318);
@@ -368,7 +426,7 @@ class DashboardPanel {
     .dot.bad { background: var(--bad); }
     .toolbar {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
     }
     .btn {
@@ -450,9 +508,68 @@ class DashboardPanel {
       gap: 10px;
       margin-bottom: 10px;
     }
+    .panel-head-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
     .panel-title { font-size: 13px; font-weight: 700; }
     .panel-meta { color: var(--muted); font-size: 11px; }
-    .chart-wrap { height: 150px; position: relative; }
+    .chart-wrap { height: 180px; position: relative; }
+    .segmented {
+      display: inline-grid;
+      grid-auto-flow: column;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--surface);
+    }
+    .segmented button {
+      min-width: 34px;
+      border: 0;
+      border-radius: 5px;
+      padding: 3px 7px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .segmented button.active {
+      color: var(--fg);
+      background: var(--panel-2);
+    }
+    .heatmap {
+      display: grid;
+      grid-template-columns: repeat(10, minmax(0, 1fr));
+      gap: 5px;
+      align-items: center;
+    }
+    .heat-cell {
+      aspect-ratio: 1;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: rgba(130, 140, 160, 0.12);
+    }
+    .heat-cell.l1 { background: rgba(53, 196, 106, 0.22); border-color: rgba(53, 196, 106, 0.24); }
+    .heat-cell.l2 { background: rgba(53, 196, 106, 0.38); border-color: rgba(53, 196, 106, 0.32); }
+    .heat-cell.l3 { background: rgba(53, 196, 106, 0.58); border-color: rgba(53, 196, 106, 0.42); }
+    .heat-cell.l4 { background: rgba(53, 196, 106, 0.82); border-color: rgba(53, 196, 106, 0.58); }
+    .compact-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--surface);
+      min-width: 0;
+    }
+    .compact-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compact-meta { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
     .empty {
       min-height: 86px;
       display: flex;
@@ -506,9 +623,11 @@ class DashboardPanel {
     .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
     @media (max-width: 320px) {
       body { padding: 10px; }
-      .toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toolbar { grid-template-columns: 1fr; }
       .kpis { grid-template-columns: 1fr; }
       .value { font-size: 17px; }
+      .panel-head { align-items: flex-start; flex-direction: column; }
+      .panel-head-actions { width: 100%; justify-content: space-between; }
     }
   </style>
 </head>
@@ -516,7 +635,7 @@ class DashboardPanel {
   <main class="shell">
     <section class="topbar">
       <div class="title">
-        <h1>DeepSeek Monitor</h1>
+        <h1>TokenLens</h1>
         <div class="subtitle" id="last-updated">等待快照</div>
       </div>
       <div class="status-pill" id="overall-status"><span class="dot"></span><span>初始化</span></div>
@@ -532,7 +651,6 @@ class DashboardPanel {
         <button class="btn primary" onclick="postMsg('refresh')">刷新余额</button>
         <button class="btn" onclick="postMsg('reset')">重置会话</button>
         <button class="btn" onclick="postMsg('export')">导出报告</button>
-        <button class="btn" onclick="switchTab('settings')">配置</button>
       </div>
 
       <section class="grid kpis" id="kpi-grid"></section>
@@ -547,14 +665,29 @@ class DashboardPanel {
 
       <section class="panel">
         <div class="panel-head">
-          <div class="panel-title">近 24 小时趋势</div>
-          <div class="panel-meta" id="trend-meta"></div>
+          <div class="panel-title">用量趋势</div>
+          <div class="panel-head-actions">
+            <div class="segmented" aria-label="趋势范围">
+              <button id="range-5h" onclick="setTrendRange('5h')">5h</button>
+              <button id="range-24h" class="active" onclick="setTrendRange('24h')">24h</button>
+              <button id="range-7d" onclick="setTrendRange('7d')">7d</button>
+            </div>
+            <div class="panel-meta" id="trend-meta"></div>
+          </div>
         </div>
         <div class="chart-wrap" id="trend-wrap"><canvas id="trendChart"></canvas></div>
-        <div class="empty hidden" id="trend-empty">暂无请求数据。使用 AI 编程工具后，这里会显示费用和 Token 趋势。</div>
+        <div class="empty hidden" id="trend-empty">暂无请求数据。使用 AI 编程工具后，这里会显示费用、Token 和请求趋势。</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="heatmap-section">
+        <div class="panel-head">
+          <div class="panel-title">使用历史</div>
+          <div class="panel-meta" id="heatmap-meta"></div>
+        </div>
+        <div class="heatmap" id="usage-heatmap"></div>
+      </section>
+
+      <section class="panel" id="model-chart-section">
         <div class="panel-head">
           <div class="panel-title">模型费用分布</div>
           <div class="panel-meta" id="model-chart-meta"></div>
@@ -563,7 +696,7 @@ class DashboardPanel {
         <div class="empty hidden" id="model-chart-empty">暂无模型费用数据。</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="provider-section">
         <div class="panel-head">
           <div class="panel-title">服务商概览</div>
           <div class="panel-meta" id="provider-meta"></div>
@@ -571,7 +704,7 @@ class DashboardPanel {
         <div id="provider-table"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="model-section">
         <div class="panel-head">
           <div class="panel-title">模型排行</div>
           <div class="panel-meta" id="model-meta"></div>
@@ -579,7 +712,7 @@ class DashboardPanel {
         <div id="model-table"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="history-section">
         <div class="panel-head">
           <div class="panel-title">最近请求</div>
           <div class="panel-meta" id="history-meta"></div>
@@ -592,7 +725,7 @@ class DashboardPanel {
       <div class="settings-group">
         <h2>API 配置</h2>
         <div class="form-row">
-          <label class="form-label">DeepSeek API Key</label>
+          <label class="form-label">DeepSeek API Key（余额查询）</label>
           <div class="form-inline">
             <input class="form-input" type="password" id="setting-apiKey" placeholder="sk-...">
             <button class="btn" onclick="saveApiKey()">保存</button>
@@ -611,7 +744,7 @@ class DashboardPanel {
 
       <div class="settings-group">
         <h2>监控选项</h2>
-        <label class="toggle-row"><span>HTTP 请求拦截</span><input type="checkbox" id="setting-interceptEnabled" onchange="saveSetting('interceptEnabled', this.checked)"></label>
+        <label class="toggle-row"><span>Agent/API 请求拦截</span><input type="checkbox" id="setting-interceptEnabled" onchange="saveSetting('interceptEnabled', this.checked)"></label>
         <label class="toggle-row"><span>VS Code 启动时自动监控</span><input type="checkbox" id="setting-autoStart" onchange="saveSetting('autoStart', this.checked)"></label>
         <label class="toggle-row"><span>显示缓存命中率</span><input type="checkbox" id="setting-showCacheHitRate" onchange="saveSetting('showCacheHitRate', this.checked)"></label>
         <label class="toggle-row"><span>用量更新通知</span><input type="checkbox" id="setting-showNotificationOnUpdate" onchange="saveSetting('showNotificationOnUpdate', this.checked)"></label>

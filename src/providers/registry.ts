@@ -77,12 +77,12 @@ export class ProviderRegistry {
   }
 
   /** 初始化默认识别 DeepSeek */
-  initDefaults(apiKey?: string): void {
+  initDefaults(apiKey?: string, apiBase: string = 'https://api.deepseek.com'): void {
     // DeepSeek API 提供
     this.register({
       name: 'DeepSeek',
       type: 'api',
-      apiBase: 'https://api.deepseek.com',
+      apiBase,
       apiKey,
       models: ['deepseek-chat', 'deepseek-reasoner'],
     });

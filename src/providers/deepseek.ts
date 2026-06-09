@@ -1,5 +1,5 @@
 /**
- * DeepSeek 提供商 —— 通过 API 实时查询余额和用量
+ * DeepSeek 提供商 —— 通过官方 API 查询余额和模型列表
  * API 文档参考: https://platform.deepseek.com/api-docs
  */
 
@@ -11,9 +11,9 @@ interface DeepSeekBalanceResponse {
   is_available: boolean;
   balance_infos: Array<{
     currency: string;
-    total_balance: number;
-    granted_balance: number;
-    topped_up_balance: number;
+    total_balance: number | string;
+    granted_balance: number | string;
+    topped_up_balance: number | string;
   }>;
 }
 
@@ -29,12 +29,21 @@ interface DeepSeekUsageItem {
   is_cache_hit: boolean;
 }
 
+interface DeepSeekModelsResponse {
+  data?: Array<{
+    id: string;
+    object?: string;
+    owned_by?: string;
+  }>;
+}
+
 function httpsGet(url: string, apiKey: string): Promise<any> {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request(
       {
         hostname: u.hostname,
+        port: u.port || undefined,
         path: u.pathname + u.search,
         method: 'GET',
         headers: {
@@ -46,6 +55,10 @@ function httpsGet(url: string, apiKey: string): Promise<any> {
         let body = '';
         res.on('data', (chunk: Buffer) => (body += chunk.toString()));
         res.on('end', () => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`DeepSeek API 返回 ${res.statusCode ?? '未知状态'}: ${body.slice(0, 200)}`));
+            return;
+          }
           try {
             resolve(JSON.parse(body));
           } catch {
@@ -99,46 +112,39 @@ export class DeepSeekProvider extends BaseProvider {
       }
 
       const info = data.balance_infos[0];
+      const toppedUpBalance = Number(info.topped_up_balance) || 0;
+      const totalBalance = Number(info.total_balance) || 0;
+      const grantedBalance = Number(info.granted_balance) || 0;
       return {
-        totalCharged: info.topped_up_balance,
-        totalUsed: info.topped_up_balance - info.total_balance + info.granted_balance,
-        balance: info.total_balance,
-        giftBalance: info.granted_balance,
+        totalCharged: toppedUpBalance,
+        totalUsed: toppedUpBalance - totalBalance + grantedBalance,
+        balance: totalBalance,
+        giftBalance: grantedBalance,
         currency: info.currency,
         fetchedAt: Date.now(),
       };
     } catch (e) {
-      console.error('[DeepSeek Monitor] 获取余额失败:', e);
-      return null;
+      console.error('[TokenLens] 获取余额失败:', e);
+      throw e;
     }
   }
 
+  async fetchModels(apiKey: string): Promise<Array<{ id: string; ownedBy?: string }>> {
+    const data = await httpsGet(
+      `${this.config.apiBase}/models`,
+      apiKey
+    ) as DeepSeekModelsResponse;
+
+    return (data.data ?? []).map((model) => ({
+      id: model.id,
+      ownedBy: model.owned_by,
+    }));
+  }
+
   async fetchRecentUsage(apiKey: string, days: number = 7): Promise<UsageEntry[]> {
-    try {
-      const endTime = Math.floor(Date.now() / 1000);
-      const startTime = endTime - days * 86400;
-
-      const data = await httpsGet(
-        `${this.config.apiBase}/v1/usage?start_time=${startTime}&end_time=${endTime}&page_size=100`,
-        apiKey
-      );
-
-      const items: DeepSeekUsageItem[] = data.data ?? [];
-      return items.map((item) => ({
-        timestamp: item.created_at * 1000,
-        provider: this.config.name,
-        model: item.model,
-        promptTokens: item.prompt_tokens,
-        completionTokens: item.completion_tokens,
-        cacheHitTokens: item.prompt_cache_hit_tokens,
-        cacheMissTokens: item.prompt_cache_miss_tokens,
-        cost: parseFloat(String(item.total_cost)) || 0,
-        endpoint: '/v1/chat/completions',
-      }));
-    } catch (e) {
-      console.error('[DeepSeek Monitor] 获取用量记录失败:', e);
-      return [];
-    }
+    // DeepSeek 官方 API 目前只公开余额查询，没有近期用量查询端点。
+    // 用量数据依赖 HTTP 拦截或本地日志解析，避免轮询不存在的 /v1/usage 导致 404 误报。
+    return [];
   }
 
   /** DeepSeek 是纯 API 模式，不实现本地解析 */

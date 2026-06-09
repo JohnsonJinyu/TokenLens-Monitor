@@ -56,13 +56,14 @@ exports.getPricing = getPricing;
 exports.getMaxLogEntries = getMaxLogEntries;
 exports.applyPricing = applyPricing;
 const vscode = __importStar(require("vscode"));
-const SECTION = 'deepseekMonitor';
+const SECTION = 'tokenLens';
 // ---- API & Provider ----
 function getApiKey() {
-    return vscode.workspace.getConfiguration(SECTION).get('apiKey', '');
+    return vscode.workspace.getConfiguration(SECTION).get('apiKey', '').trim();
 }
 function getApiBase() {
-    return vscode.workspace.getConfiguration(SECTION).get('apiBase', 'https://api.deepseek.com');
+    const value = vscode.workspace.getConfiguration(SECTION).get('apiBase', 'https://api.deepseek.com').trim();
+    return value.replace(/\/+$/, '') || 'https://api.deepseek.com';
 }
 function getProviders() {
     return vscode.workspace.getConfiguration(SECTION).get('providers', []);
