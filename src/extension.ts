@@ -31,7 +31,7 @@ let tracker: UsageTracker;
 let storage: StorageManager;
 let apiMonitor: ApiMonitor;
 let localMonitor: LocalMonitor;
-let statusBar: StatusBarManager;
+let statusBar: vscode.Disposable | undefined;
 let dashboardProvider: DashboardPanel;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -41,7 +41,29 @@ export function activate(context: vscode.ExtensionContext) {
   try {
     storage = new StorageManager(context, getMaxLogEntries());
     tracker = new UsageTracker(storage);
-    statusBar = new StatusBarManager(tracker);
+    statusBar = new StatusBarManager(
+      tracker,
+      storage,
+      () => ({
+        http: interceptor.getInterceptionStatus(),
+        api: apiMonitor?.getStatus() ?? {
+          running: false,
+          configured: !!getApiKey(),
+          lastBalanceAt: 0,
+          lastUsageAt: 0,
+          lastError: '',
+          lastEntryCount: 0,
+        },
+        local: localMonitor?.getStatus() ?? {
+          running: false,
+          configured: false,
+          lastScanAt: 0,
+          lastError: '',
+          lastEntryCount: 0,
+        },
+      })
+    );
+    context.subscriptions.push(statusBar);
     console.log('[DeepSeek Monitor] ✅ StatusBar 已创建');
   } catch (e) {
     console.error('[DeepSeek Monitor] ❌ StatusBar 创建失败:', e);
@@ -52,7 +74,8 @@ export function activate(context: vscode.ExtensionContext) {
       fallback.tooltip = 'DeepSeek Monitor';
       fallback.command = 'deepseekMonitor.showDashboard';
       fallback.show();
-      statusBar = fallback as any;
+      statusBar = fallback;
+      context.subscriptions.push(statusBar);
     } catch { /* 彻底放弃 */ }
   }
 
@@ -115,7 +138,29 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   // ---- Dashboard Webview ----
-  dashboardProvider = new DashboardPanel(tracker, context.extensionUri);
+  dashboardProvider = new DashboardPanel(
+    tracker,
+    storage,
+    context.extensionUri,
+    () => ({
+      http: interceptor.getInterceptionStatus(),
+      api: apiMonitor?.getStatus() ?? {
+        running: false,
+        configured: false,
+        lastBalanceAt: 0,
+        lastUsageAt: 0,
+        lastError: 'API 监控器未初始化',
+        lastEntryCount: 0,
+      },
+      local: localMonitor?.getStatus() ?? {
+        running: false,
+        configured: false,
+        lastScanAt: 0,
+        lastError: '本地扫描器未初始化',
+        lastEntryCount: 0,
+      },
+    })
+  );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'deepseekMonitor.dashboard',
@@ -199,6 +244,8 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
   stopAllMonitors();
   interceptor.stopInterception();
+  statusBar?.dispose();
+  statusBar = undefined;
   console.log('[DeepSeek Monitor] 👋 已停止');
 }
 
@@ -255,8 +302,8 @@ function startAllMonitors(): void {
 }
 
 function stopAllMonitors(): void {
-  apiMonitor.stop();
-  localMonitor.stop();
+  apiMonitor?.stop();
+  localMonitor?.stop();
 }
 
 async function exportReport(): Promise<void> {

@@ -1,8 +1,7 @@
 "use strict";
 /**
- * 仪表板 Webview Provider —— 侧栏可视化面板。
- * 展示图表、用量历史、余额、缓存命中率等详细信息。
- * 内嵌设置页面，无需打开配置文件即可修改所有选项。
+ * 仪表板 Webview Provider。
+ * 负责把统计、历史、趋势和监控健康状态合并为一个 DashboardSnapshot。
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -40,12 +39,15 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DashboardPanel = void 0;
 const vscode = __importStar(require("vscode"));
+const settings_1 = require("../config/settings");
 const SECTION = 'deepseekMonitor';
 class DashboardPanel {
-    constructor(tracker, extensionUri) {
+    constructor(tracker, storage, extensionUri, getMonitorStatus) {
         this.tracker = tracker;
+        this.storage = storage;
         this._extensionUri = extensionUri;
-        this.tracker.onUpdate((stats) => this.postUpdate(stats));
+        this.getMonitorStatus = getMonitorStatus;
+        this.tracker.onUpdate((stats) => this.postSnapshot(stats));
     }
     resolveWebviewView(webviewView, _context, _token) {
         this._view = webviewView;
@@ -60,8 +62,7 @@ class DashboardPanel {
         webviewView.webview.onDidReceiveMessage((msg) => {
             switch (msg.type) {
                 case 'ready':
-                    this.postUpdate(this.tracker.getStats());
-                    // 发送当前设置到 webview
+                    this.postSnapshot(this.tracker.getStats());
                     this.postSettings();
                     break;
                 case 'refresh':
@@ -73,7 +74,6 @@ class DashboardPanel {
                 case 'export':
                     vscode.commands.executeCommand('deepseekMonitor.exportReport');
                     break;
-                // ---- 设置相关消息 ----
                 case 'saveSetting':
                     this.saveSetting(msg.key, msg.value);
                     break;
@@ -83,52 +83,117 @@ class DashboardPanel {
             }
         });
     }
-    /** 保存单个设置项 */
     saveSetting(key, value) {
         const config = vscode.workspace.getConfiguration(SECTION);
         config.update(key, value, vscode.ConfigurationTarget.Global).then(() => {
             this._view?.webview.postMessage({ type: 'settingSaved', key, success: true });
-            vscode.window.showInformationMessage(`✅ 设置已保存: ${key}`);
+            this.postSettings();
+            this.postSnapshot(this.tracker.getStats());
         }, (err) => {
             this._view?.webview.postMessage({ type: 'settingSaved', key, success: false, error: String(err) });
-            vscode.window.showErrorMessage(`❌ 保存失败: ${err}`);
+            vscode.window.showErrorMessage(`DeepSeek Monitor 设置保存失败: ${err}`);
         });
     }
-    /** 推送当前设置到 webview */
     postSettings() {
         if (!this._view) {
             return;
         }
         const config = vscode.workspace.getConfiguration(SECTION);
-        const settings = {};
-        // 读取所有相关设置
         const keys = [
             'apiKey', 'apiBase', 'balanceCheckInterval', 'interceptEnabled',
             'autoStart', 'showCacheHitRate', 'statusBarDisplay',
             'contextWarnThreshold', 'contextCriticalThreshold',
             'costAlertThreshold', 'showNotificationOnUpdate', 'theme',
         ];
+        const settings = {};
         for (const k of keys) {
             settings[k] = config.get(k);
         }
-        // apiKey 脱敏显示
         if (settings.apiKey && typeof settings.apiKey === 'string' && settings.apiKey.length > 8) {
-            settings.apiKeyMasked = settings.apiKey.slice(0, 4) + '****' + settings.apiKey.slice(-4);
+            settings.apiKeyMasked = settings.apiKey.slice(0, 4) + '...' + settings.apiKey.slice(-4);
         }
         else if (settings.apiKey) {
-            settings.apiKeyMasked = '****';
+            settings.apiKeyMasked = 'configured';
         }
         else {
             settings.apiKeyMasked = '';
         }
         this._view.webview.postMessage({ type: 'settings', data: settings });
     }
-    /** 推送更新到 webview */
-    postUpdate(stats) {
+    postSnapshot(stats) {
         if (!this._view) {
             return;
         }
-        const serializable = {
+        this._view.webview.postMessage({ type: 'snapshot', data: this.buildSnapshot(stats) });
+    }
+    buildSnapshot(stats) {
+        const history = this.storage.getUsageHistory();
+        const now = Date.now();
+        const dayAgo = now - 24 * 60 * 60 * 1000;
+        const recentHistory = history.slice(-80).reverse().map((entry) => ({
+            ...entry,
+            totalTokens: entry.promptTokens + entry.completionTokens,
+            source: entry.endpoint || 'captured',
+        }));
+        const providerRows = Array.from(stats.byProvider.entries()).map(([name, ps]) => ({
+            name,
+            requests: ps.totalRequests,
+            promptTokens: ps.totalPromptTokens,
+            completionTokens: ps.totalCompletionTokens,
+            totalTokens: ps.totalPromptTokens + ps.totalCompletionTokens,
+            cost: ps.totalCost,
+            cacheHitRate: ps.cacheHitRate,
+            cacheHitTokens: Array.from(ps.byModel.values()).reduce((sum, m) => sum + m.cacheHitTokens, 0),
+            cacheMissTokens: Array.from(ps.byModel.values()).reduce((sum, m) => sum + m.cacheMissTokens, 0),
+            balance: ps.balance,
+        })).sort((a, b) => b.cost - a.cost || b.totalTokens - a.totalTokens);
+        const modelRows = Array.from(stats.byProvider.entries()).flatMap(([provider, ps]) => Array.from(ps.byModel.entries()).map(([model, m]) => {
+            const cacheTotal = m.cacheHitTokens + m.cacheMissTokens;
+            return {
+                provider,
+                model,
+                requests: m.requests,
+                promptTokens: m.promptTokens,
+                completionTokens: m.completionTokens,
+                totalTokens: m.promptTokens + m.completionTokens,
+                cost: m.cost,
+                cacheHitRate: cacheTotal > 0 ? (m.cacheHitTokens / cacheTotal) * 100 : 0,
+                cacheHitTokens: m.cacheHitTokens,
+                cacheMissTokens: m.cacheMissTokens,
+            };
+        })).sort((a, b) => b.cost - a.cost || b.totalTokens - a.totalTokens);
+        const recent24h = history.filter((entry) => entry.timestamp >= dayAgo);
+        const last24h = recent24h.reduce((acc, entry) => {
+            acc.requests += 1;
+            acc.tokens += entry.promptTokens + entry.completionTokens;
+            acc.cost += entry.cost;
+            acc.cacheHitTokens += entry.cacheHitTokens ?? 0;
+            acc.cacheMissTokens += entry.cacheMissTokens ?? 0;
+            return acc;
+        }, { requests: 0, tokens: 0, cost: 0, cacheHitTokens: 0, cacheMissTokens: 0 });
+        const balanceSummary = this.buildBalanceSummary(providerRows);
+        const cacheSummary = this.buildCacheSummary(modelRows);
+        return {
+            generatedAt: now,
+            stats: this.serializeStats(stats),
+            recentHistory,
+            providerRows,
+            modelRows,
+            trend: this.buildTrend(history, now),
+            last24h,
+            balanceSummary,
+            cacheSummary,
+            statusBarSummary: {
+                balanceText: balanceSummary.primary ? this.formatMoney(balanceSummary.primary.balance, balanceSummary.primary.currency) : '未查询',
+                costText: this.formatMoney(stats.totalCost),
+                tokenText: this.formatTokens(stats.totalTokens),
+                contextText: stats.lastContextPercent ? `${stats.lastContextPercent}%` : '未捕获',
+            },
+            monitorStatus: this.getMonitorStatus(),
+        };
+    }
+    serializeStats(stats) {
+        return {
             totalCost: stats.totalCost,
             totalTokens: stats.totalTokens,
             totalRequests: stats.totalRequests,
@@ -136,30 +201,95 @@ class DashboardPanel {
             sessionDuration: stats.sessionDuration,
             lastContextPercent: stats.lastContextPercent || 0,
             lastModel: stats.lastModel || '',
-            byProvider: Array.from(stats.byProvider.entries()).map(([name, ps]) => ({
-                name,
-                totalPromptTokens: ps.totalPromptTokens,
-                totalCompletionTokens: ps.totalCompletionTokens,
-                totalCost: ps.totalCost,
-                totalRequests: ps.totalRequests,
-                cacheHitRate: ps.cacheHitRate,
-                balance: ps.balance,
-                byModel: Array.from(ps.byModel.entries()).map(([model, m]) => ({
-                    model,
-                    promptTokens: m.promptTokens,
-                    completionTokens: m.completionTokens,
-                    cost: m.cost,
-                    requests: m.requests,
-                    cacheHitTokens: m.cacheHitTokens,
-                    cacheMissTokens: m.cacheMissTokens,
-                })),
-            })),
         };
-        this._view.webview.postMessage({ type: 'update', data: serializable });
     }
-    /** 生成 HTML */
+    buildTrend(history, now) {
+        const start = now - 23 * 60 * 60 * 1000;
+        const buckets = new Map();
+        for (let i = 0; i < 24; i++) {
+            const d = new Date(start + i * 60 * 60 * 1000);
+            d.setMinutes(0, 0, 0);
+            buckets.set(d.getTime(), { cost: 0, tokens: 0, requests: 0 });
+        }
+        for (const entry of history) {
+            if (entry.timestamp < start || entry.timestamp > now) {
+                continue;
+            }
+            const d = new Date(entry.timestamp);
+            d.setMinutes(0, 0, 0);
+            const bucket = buckets.get(d.getTime());
+            if (!bucket) {
+                continue;
+            }
+            bucket.cost += entry.cost;
+            bucket.tokens += entry.promptTokens + entry.completionTokens;
+            bucket.requests += 1;
+        }
+        return Array.from(buckets.entries()).map(([time, value]) => ({
+            label: new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', hour12: false }),
+            ...value,
+        }));
+    }
+    buildBalanceSummary(providerRows) {
+        const providers = [];
+        for (const row of providerRows) {
+            if (row.balance) {
+                providers.push({ ...row.balance, provider: row.name });
+            }
+        }
+        return {
+            primary: providers[0],
+            providers,
+        };
+    }
+    buildCacheSummary(modelRows) {
+        const hitTokens = modelRows.reduce((sum, row) => sum + row.cacheHitTokens, 0);
+        const missTokens = modelRows.reduce((sum, row) => sum + row.cacheMissTokens, 0);
+        const totalTokens = hitTokens + missTokens;
+        const pricing = (0, settings_1.getPricing)();
+        let estimatedSavings = 0;
+        let hasSavingsEstimate = false;
+        for (const row of modelRows) {
+            const p = pricing[row.model];
+            if (!p || !p.cacheHitDiscount || row.cacheHitTokens <= 0) {
+                continue;
+            }
+            estimatedSavings += (row.cacheHitTokens / 1000000) * p.input * (1 - p.cacheHitDiscount);
+            hasSavingsEstimate = true;
+        }
+        return {
+            hitTokens,
+            missTokens,
+            totalTokens,
+            hitRate: totalTokens > 0 ? (hitTokens / totalTokens) * 100 : null,
+            estimatedSavings: hasSavingsEstimate ? estimatedSavings : null,
+        };
+    }
+    formatMoney(value, currency = 'CNY') {
+        const symbol = currency === 'USD' ? '$' : '¥';
+        if (value === 0) {
+            return `${symbol}0`;
+        }
+        if (Math.abs(value) < 0.01) {
+            return `${symbol}${value.toFixed(4)}`;
+        }
+        if (Math.abs(value) < 1) {
+            return `${symbol}${value.toFixed(3)}`;
+        }
+        return `${symbol}${value.toFixed(2)}`;
+    }
+    formatTokens(value) {
+        if (value >= 1000000) {
+            return `${(value / 1000000).toFixed(2)}M`;
+        }
+        if (value >= 1000) {
+            return `${(value / 1000).toFixed(1)}k`;
+        }
+        return String(Math.round(value));
+    }
     getHtml() {
         const mediaUri = vscode.Uri.joinPath(this._extensionUri, 'media');
+        const assetVersion = Date.now();
         const dashboardJsUri = this._view.webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'dashboard.js'));
         const chartJsUri = this._view.webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'chart.min.js'));
         const csp = this._view.webview.cspSource;
@@ -177,285 +307,353 @@ class DashboardPanel {
   <title>DeepSeek Monitor</title>
   <style>
     :root {
-      --bg: var(--vscode-editor-background, #1e1e2e);
-      --fg: var(--vscode-editor-foreground, #cdd6f4);
-      --accent: var(--vscode-activityBar-activeBorder, #89b4fa);
-      --card: var(--vscode-editorWidget-background, #313244);
-      --border: var(--vscode-panel-border, #45475a);
-      --muted: var(--vscode-descriptionForeground, #a6adc8);
-      --green: #a6e3a1;
-      --yellow: #f9e2af;
-      --red: #f38ba8;
-      --purple: #cba6f7;
-      --blue: #89dceb;
-      --radius: 10px;
+      --bg: var(--vscode-editor-background, #111318);
+      --surface: var(--vscode-sideBar-background, #181b21);
+      --panel: var(--vscode-editorWidget-background, #20242c);
+      --panel-2: var(--vscode-input-background, #252a33);
+      --border: var(--vscode-panel-border, #363b46);
+      --fg: var(--vscode-editor-foreground, #e7eaf0);
+      --muted: var(--vscode-descriptionForeground, #98a2b3);
+      --accent: var(--vscode-focusBorder, #4f8cff);
+      --good: #35c46a;
+      --warn: #d9a441;
+      --bad: #ef5f6b;
+      --chart-a: #4f8cff;
+      --chart-b: #35c46a;
+      --chart-c: #d9a441;
+      --chart-d: #a78bfa;
+      --radius: 8px;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * { box-sizing: border-box; }
     body {
+      margin: 0;
+      padding: 12px;
       background: var(--bg);
       color: var(--fg);
-      font-family: var(--vscode-font-family, -apple-system, sans-serif);
-      font-size: 13px;
-      padding: 12px;
-      line-height: 1.5;
+      font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    button, input, select {
+      font: inherit;
     }
     .hidden { display: none !important; }
-
-    /* ---- 顶部导航 ---- */
-    .nav-bar { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; }
-    .nav-tab {
-      padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px;
-      border: 1px solid var(--border); background: var(--card); color: var(--fg);
-      transition: all 0.15s;
+    .shell { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
     }
-    .nav-tab:hover { background: var(--border); }
-    .nav-tab.active { background: var(--accent); color: #1e1e2e; border-color: var(--accent); font-weight: 600; }
-
-    /* ---- 操作栏 ---- */
-    .actions { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .title { min-width: 0; }
+    .title h1 { margin: 0; font-size: 16px; line-height: 1.2; font-weight: 700; letter-spacing: 0; }
+    .subtitle { color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--surface);
+      white-space: nowrap;
+      font-size: 11px;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+    .dot.good { background: var(--good); }
+    .dot.warn { background: var(--warn); }
+    .dot.bad { background: var(--bad); }
+    .toolbar {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
     .btn {
-      background: var(--card); border: 1px solid var(--border); border-radius: 6px;
-      color: var(--fg); padding: 6px 14px; font-size: 12px; cursor: pointer;
-      display: flex; align-items: center; gap: 5px; transition: all 0.15s;
+      min-height: 30px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--fg);
+      cursor: pointer;
+      padding: 6px 8px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .btn:hover { background: var(--border); }
-    .btn-primary { background: var(--accent); color: #1e1e2e; border-color: var(--accent); font-weight: 600; }
-    .btn-primary:hover { opacity: 0.85; }
-    .btn-sm { padding: 4px 10px; font-size: 11px; }
-
-    /* ---- 概览卡片 ---- */
-    .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
-    .card {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 14px; position: relative; overflow: hidden;
+    .btn:hover { border-color: var(--accent); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .tab {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      border-radius: 7px;
+      padding: 7px 10px;
+      cursor: pointer;
     }
-    .card::before {
-      content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 3px;
+    .tab.active { background: var(--panel); color: var(--fg); border-color: var(--accent); }
+    .grid { display: grid; gap: 10px; }
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card, .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      min-width: 0;
     }
-    .card.card-cost::before  { background: linear-gradient(90deg, #89b4fa, #cba6f7); }
-    .card.card-token::before { background: linear-gradient(90deg, #a6e3a1, #94e2d5); }
-    .card.card-cache::before { background: linear-gradient(90deg, #f9e2af, #fab387); }
-    .card.card-time::before { background: linear-gradient(90deg, #f38ba8, #cba6f7); }
-    .card-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 4px; }
-    .card-value { font-size: 22px; font-weight: 700; }
-    .card-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
-    .card-icon { position: absolute; top: 12px; right: 12px; font-size: 20px; opacity: 0.3; }
-
-    /* ---- 图表 ---- */
-    .chart-section { margin-bottom: 14px; }
-    .chart-container { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
-    .chart-title { font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--muted); }
-    canvas { width: 100% !important; max-height: 220px; }
-
-    /* ---- 表格 ---- */
-    .table-section { margin-bottom: 14px; }
-    .section-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--muted); }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { padding: 7px 8px; text-align: left; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-    tr:hover td { background: rgba(255,255,255,0.02); }
-    .badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 600; }
-    .badge-good  { background: rgba(166,227,161,0.15); color: var(--green); }
-    .badge-warn  { background: rgba(249,226,175,0.15); color: var(--yellow); }
-    .badge-poor  { background: rgba(243,139,168,0.15); color: var(--red); }
-
-    /* ---- 空状态 ---- */
-    .onboarding { text-align: center; padding: 32px 16px; }
-    .onboarding-icon { font-size: 48px; margin-bottom: 16px; }
-    .onboarding h2 { font-size: 18px; margin-bottom: 8px; }
-    .onboarding p { color: var(--muted); font-size: 13px; line-height: 1.8; margin-bottom: 20px; }
-    .onboarding .steps { text-align: left; display: inline-block; }
-    .onboarding .steps li { margin-bottom: 8px; color: var(--muted); }
-    .onboarding .steps li span { color: var(--fg); font-weight: 600; }
-
-    /* ---- 设置面板 ---- */
-    .settings-panel { margin-bottom: 14px; }
-    .settings-group {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 14px; margin-bottom: 10px;
+    .card { padding: 12px; min-height: 84px; }
+    .label { color: var(--muted); font-size: 11px; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+    .kpi-icon { font-size: 15px; line-height: 1; }
+    .value {
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: 0;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .settings-group h4 {
-      font-size: 13px; font-weight: 600; margin-bottom: 10px;
-      display: flex; align-items: center; gap: 6px;
+    .sub { color: var(--muted); margin-top: 6px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meter {
+      height: 5px;
+      margin-top: 10px;
+      border-radius: 999px;
+      background: rgba(130, 140, 160, 0.18);
+      overflow: hidden;
     }
+    .meter-fill {
+      height: 100%;
+      width: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      transition: width 0.25s ease;
+    }
+    .meter-fill.good { background: var(--good); }
+    .meter-fill.warn { background: var(--warn); }
+    .meter-fill.bad { background: var(--bad); }
+    .metric-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 6px;
+    }
+    .metric-line span:last-child { color: var(--fg); font-variant-numeric: tabular-nums; }
+    .panel { padding: 12px; }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .panel-title { font-size: 13px; font-weight: 700; }
+    .panel-meta { color: var(--muted); font-size: 11px; }
+    .chart-wrap { height: 150px; position: relative; }
+    .empty {
+      min-height: 86px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: var(--muted);
+      border: 1px dashed var(--border);
+      border-radius: 7px;
+      padding: 14px;
+    }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { padding: 7px 6px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+    th { color: var(--muted); font-weight: 600; font-size: 11px; }
+    td { font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    .status-list { display: grid; gap: 8px; }
+    .health-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--surface);
+      min-width: 0;
+    }
+    .health-main { min-width: 0; }
+    .health-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .health-detail { color: var(--muted); font-size: 11px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .health-state { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .settings-panel { display: grid; gap: 10px; }
+    .settings-group { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+    .settings-group h2 { font-size: 13px; margin: 0 0 10px; }
     .form-row { margin-bottom: 10px; }
-    .form-label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; font-weight: 500; }
+    .form-row:last-child { margin-bottom: 0; }
+    .form-label { display: block; color: var(--muted); margin-bottom: 5px; font-size: 11px; }
     .form-input, .form-select {
-      width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border);
-      background: var(--bg); color: var(--fg); font-size: 12px;
-      font-family: var(--vscode-font-family, monospace);
+      width: 100%;
+      background: var(--panel-2);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 7px 8px;
+      min-width: 0;
     }
-    .form-input:focus, .form-select:focus { border-color: var(--accent); outline: none; }
-    .form-input[type="password"] { -webkit-text-security: disc; }
-    .form-row-inline { display: flex; gap: 8px; align-items: end; }
-    .form-row-inline .form-row { flex: 1; margin-bottom: 0; }
-    .form-hint { font-size: 10px; color: var(--muted); margin-top: 3px; }
-    .form-toggle {
-      display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+    .form-inline { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; }
+    .toggle-row input { width: 16px; height: 16px; }
+    .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    @media (max-width: 320px) {
+      body { padding: 10px; }
+      .toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .kpis { grid-template-columns: 1fr; }
+      .value { font-size: 17px; }
     }
-    .form-toggle-label { font-size: 12px; }
-    .toggle-switch {
-      position: relative; width: 36px; height: 20px; cursor: pointer;
-    }
-    .toggle-switch input { opacity: 0; width: 0; height: 0; }
-    .toggle-slider {
-      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-      background: var(--border); border-radius: 20px; transition: 0.2s;
-    }
-    .toggle-slider::before {
-      content: ''; position: absolute; height: 14px; width: 14px;
-      left: 3px; bottom: 3px; background: var(--fg);
-      border-radius: 50%; transition: 0.2s;
-    }
-    input:checked + .toggle-slider { background: var(--accent); }
-    input:checked + .toggle-slider::before { transform: translateX(16px); }
-    .save-indicator { font-size: 11px; color: var(--green); margin-left: 8px; opacity: 0; transition: opacity 0.3s; }
-    .save-indicator.show { opacity: 1; }
   </style>
 </head>
 <body>
-  <!-- 顶部标签切换 -->
-  <div class="nav-bar">
-    <span class="nav-tab active" id="tab-monitor" onclick="switchTab('monitor')">📊 监控</span>
-    <span class="nav-tab" id="tab-settings" onclick="switchTab('settings')">⚙️ 设置</span>
-  </div>
-
-  <!-- ========== 监控面板 ========== -->
-  <div id="panel-monitor">
-    <div id="onboarding" class="onboarding">
-      <div class="onboarding-icon">🛰️</div>
-      <h2>DeepSeek Monitor 已就绪</h2>
-      <p>正在自动监控所有 VSCode 插件发往 LLM API 的请求。<br>无需额外配置，开始使用 AI 编程工具即可看到数据。</p>
-      <ul class="steps">
-        <li>✅ <span>自动拦截</span> — 无需 API Key，所有 HTTPS 请求自动捕获</li>
-        <li>🔑 <span>可选配置</span> — 设置 API Key 即可查看余额</li>
-        <li>📊 <span>实时显示</span> — 状态栏 + 面板同步更新</li>
-      </ul>
-    </div>
-
-    <div id="data-panel" class="hidden">
-      <div class="actions">
-        <button class="btn btn-primary" onclick="postMsg('refresh')">🔄 刷新余额</button>
-        <button class="btn" onclick="postMsg('reset')">🗑 重置会话</button>
-        <button class="btn" onclick="postMsg('export')">📥 导出报告</button>
+  <main class="shell">
+    <section class="topbar">
+      <div class="title">
+        <h1>DeepSeek Monitor</h1>
+        <div class="subtitle" id="last-updated">等待快照</div>
       </div>
-      <div id="cards" class="cards"></div>
-      <div id="charts" class="chart-section">
-        <div class="chart-container">
-          <div class="chart-title">📈 各模型费用分布</div>
-          <canvas id="costChart"></canvas>
+      <div class="status-pill" id="overall-status"><span class="dot"></span><span>初始化</span></div>
+    </section>
+
+    <nav class="tabs">
+      <button class="tab active" id="tab-monitor" onclick="switchTab('monitor')">监控</button>
+      <button class="tab" id="tab-settings" onclick="switchTab('settings')">设置</button>
+    </nav>
+
+    <section id="panel-monitor" class="shell">
+      <div class="toolbar">
+        <button class="btn primary" onclick="postMsg('refresh')">刷新余额</button>
+        <button class="btn" onclick="postMsg('reset')">重置会话</button>
+        <button class="btn" onclick="postMsg('export')">导出报告</button>
+        <button class="btn" onclick="switchTab('settings')">配置</button>
+      </div>
+
+      <section class="grid kpis" id="kpi-grid"></section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title">监控健康</div>
+          <div class="panel-meta" id="health-meta"></div>
         </div>
-      </div>
-      <div id="table-section" class="table-section">
-        <div class="section-title">📋 详细记录</div>
+        <div class="status-list" id="health-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title">近 24 小时趋势</div>
+          <div class="panel-meta" id="trend-meta"></div>
+        </div>
+        <div class="chart-wrap" id="trend-wrap"><canvas id="trendChart"></canvas></div>
+        <div class="empty hidden" id="trend-empty">暂无请求数据。使用 AI 编程工具后，这里会显示费用和 Token 趋势。</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title">模型费用分布</div>
+          <div class="panel-meta" id="model-chart-meta"></div>
+        </div>
+        <div class="chart-wrap" id="model-chart-wrap"><canvas id="modelCostChart"></canvas></div>
+        <div class="empty hidden" id="model-chart-empty">暂无模型费用数据。</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title">服务商概览</div>
+          <div class="panel-meta" id="provider-meta"></div>
+        </div>
+        <div id="provider-table"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title">模型排行</div>
+          <div class="panel-meta" id="model-meta"></div>
+        </div>
         <div id="model-table"></div>
-      </div>
-    </div>
-  </div>
+      </section>
 
-  <!-- ========== 设置面板 ========== -->
-  <div id="panel-settings" class="hidden settings-panel">
-    <!-- API 设置 -->
-    <div class="settings-group">
-      <h4>🔑 API 配置</h4>
-      <div class="form-row">
-        <label class="form-label">DeepSeek API Key</label>
-        <div class="form-row-inline">
-          <div class="form-row" style="flex:1">
-            <input class="form-input" type="password" id="setting-apiKey" placeholder="sk-...">
-          </div>
-          <button class="btn btn-sm" onclick="saveApiKey()">💾 保存</button>
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title">最近请求</div>
+          <div class="panel-meta" id="history-meta"></div>
         </div>
-        <div class="form-hint" id="api-key-status"></div>
-      </div>
-      <div class="form-row">
-        <label class="form-label">API Base URL</label>
-        <input class="form-input" id="setting-apiBase" placeholder="https://api.deepseek.com" onchange="saveSetting('apiBase', this.value)">
-      </div>
-      <div class="form-row">
-        <label class="form-label">余额查询间隔（分钟）</label>
-        <input class="form-input" type="number" id="setting-balanceCheckInterval" min="1" max="60" onchange="saveSetting('balanceCheckInterval', parseInt(this.value))">
-      </div>
-    </div>
+        <div id="history-table"></div>
+      </section>
+    </section>
 
-    <!-- 监控设置 -->
-    <div class="settings-group">
-      <h4>📡 监控设置</h4>
-      <div class="form-toggle">
-        <span class="form-toggle-label">HTTP 请求拦截</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="setting-interceptEnabled" onchange="saveSetting('interceptEnabled', this.checked)">
-          <span class="toggle-slider"></span>
-        </label>
+    <section id="panel-settings" class="hidden settings-panel">
+      <div class="settings-group">
+        <h2>API 配置</h2>
+        <div class="form-row">
+          <label class="form-label">DeepSeek API Key</label>
+          <div class="form-inline">
+            <input class="form-input" type="password" id="setting-apiKey" placeholder="sk-...">
+            <button class="btn" onclick="saveApiKey()">保存</button>
+          </div>
+          <div class="hint" id="api-key-status"></div>
+        </div>
+        <div class="form-row">
+          <label class="form-label">API Base URL</label>
+          <input class="form-input" id="setting-apiBase" placeholder="https://api.deepseek.com" onchange="saveSetting('apiBase', this.value)">
+        </div>
+        <div class="form-row">
+          <label class="form-label">余额查询间隔（分钟）</label>
+          <input class="form-input" type="number" id="setting-balanceCheckInterval" min="1" max="60" onchange="saveSetting('balanceCheckInterval', parseInt(this.value, 10))">
+        </div>
       </div>
-      <div class="form-toggle">
-        <span class="form-toggle-label">VSCode 启动时自动监控</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="setting-autoStart" onchange="saveSetting('autoStart', this.checked)">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-      <div class="form-toggle">
-        <span class="form-toggle-label">显示缓存命中率</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="setting-showCacheHitRate" onchange="saveSetting('showCacheHitRate', this.checked)">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-      <div class="form-toggle">
-        <span class="form-toggle-label">用量更新通知</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="setting-showNotificationOnUpdate" onchange="saveSetting('showNotificationOnUpdate', this.checked)">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-      <div class="form-row">
-        <label class="form-label">状态栏显示内容</label>
-        <select class="form-select" id="setting-statusBarDisplay" onchange="saveSetting('statusBarDisplay', this.value)">
-          <option value="cost-only">仅费用</option>
-          <option value="cost-tokens">费用 + Token</option>
-          <option value="cost-tokens-cache">费用 + Token + 缓存命中</option>
-          <option value="cost-tokens-cache-context">全部（含上下文占比）</option>
-        </select>
-      </div>
-    </div>
 
-    <!-- 告警设置 -->
-    <div class="settings-group">
-      <h4>⚠️ 告警阈值</h4>
-      <div class="form-row">
-        <label class="form-label">上下文窗口告警阈值（%）</label>
-        <input class="form-input" type="number" id="setting-contextWarnThreshold" min="0" max="100" onchange="saveSetting('contextWarnThreshold', parseInt(this.value))">
-        <div class="form-hint">超过此值状态栏变黄</div>
+      <div class="settings-group">
+        <h2>监控选项</h2>
+        <label class="toggle-row"><span>HTTP 请求拦截</span><input type="checkbox" id="setting-interceptEnabled" onchange="saveSetting('interceptEnabled', this.checked)"></label>
+        <label class="toggle-row"><span>VS Code 启动时自动监控</span><input type="checkbox" id="setting-autoStart" onchange="saveSetting('autoStart', this.checked)"></label>
+        <label class="toggle-row"><span>显示缓存命中率</span><input type="checkbox" id="setting-showCacheHitRate" onchange="saveSetting('showCacheHitRate', this.checked)"></label>
+        <label class="toggle-row"><span>用量更新通知</span><input type="checkbox" id="setting-showNotificationOnUpdate" onchange="saveSetting('showNotificationOnUpdate', this.checked)"></label>
+        <div class="form-row">
+          <label class="form-label">状态栏显示内容</label>
+          <select class="form-select" id="setting-statusBarDisplay" onchange="saveSetting('statusBarDisplay', this.value)">
+            <option value="cost-only">仅费用</option>
+            <option value="cost-tokens">费用 + Token</option>
+            <option value="cost-tokens-cache">费用 + Token + 缓存命中</option>
+            <option value="cost-tokens-cache-context">全部（含上下文占比）</option>
+          </select>
+        </div>
       </div>
-      <div class="form-row">
-        <label class="form-label">上下文窗口严重告警（%）</label>
-        <input class="form-input" type="number" id="setting-contextCriticalThreshold" min="0" max="100" onchange="saveSetting('contextCriticalThreshold', parseInt(this.value))">
-        <div class="form-hint">超过此值状态栏变红</div>
-      </div>
-      <div class="form-row">
-        <label class="form-label">费用告警阈值（元）</label>
-        <input class="form-input" type="number" id="setting-costAlertThreshold" min="0" step="1" onchange="saveSetting('costAlertThreshold', parseFloat(this.value))">
-        <div class="form-hint">超过此值弹出通知提醒。0 = 关闭告警</div>
-      </div>
-    </div>
 
-    <!-- 外观设置 -->
-    <div class="settings-group">
-      <h4>🎨 外观</h4>
-      <div class="form-row">
-        <label class="form-label">面板主题</label>
-        <select class="form-select" id="setting-theme" onchange="saveSetting('theme', this.value)">
-          <option value="auto">跟随 VSCode</option>
-          <option value="dark">深色</option>
-          <option value="light">浅色</option>
-        </select>
+      <div class="settings-group">
+        <h2>告警和外观</h2>
+        <div class="form-row">
+          <label class="form-label">上下文窗口告警阈值（%）</label>
+          <input class="form-input" type="number" id="setting-contextWarnThreshold" min="0" max="100" onchange="saveSetting('contextWarnThreshold', parseInt(this.value, 10))">
+        </div>
+        <div class="form-row">
+          <label class="form-label">上下文窗口严重告警（%）</label>
+          <input class="form-input" type="number" id="setting-contextCriticalThreshold" min="0" max="100" onchange="saveSetting('contextCriticalThreshold', parseInt(this.value, 10))">
+        </div>
+        <div class="form-row">
+          <label class="form-label">费用告警阈值（元）</label>
+          <input class="form-input" type="number" id="setting-costAlertThreshold" min="0" step="1" onchange="saveSetting('costAlertThreshold', parseFloat(this.value))">
+        </div>
+        <div class="form-row">
+          <label class="form-label">面板主题</label>
+          <select class="form-select" id="setting-theme" onchange="saveSetting('theme', this.value)">
+            <option value="auto">跟随 VS Code</option>
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+          </select>
+        </div>
       </div>
-    </div>
-  </div>
+    </section>
+  </main>
 
-  <script src="${chartJsUri}"></script>
-  <script src="${dashboardJsUri}"></script>
+  <script src="${chartJsUri}?v=${assetVersion}"></script>
+  <script src="${dashboardJsUri}?v=${assetVersion}"></script>
 </body>
 </html>`;
     }

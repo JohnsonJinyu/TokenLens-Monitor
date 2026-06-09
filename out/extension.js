@@ -69,7 +69,25 @@ function activate(context) {
     try {
         storage = new storage_1.StorageManager(context, (0, settings_1.getMaxLogEntries)());
         tracker = new usageTracker_1.UsageTracker(storage);
-        statusBar = new statusBarManager_1.StatusBarManager(tracker);
+        statusBar = new statusBarManager_1.StatusBarManager(tracker, storage, () => ({
+            http: interceptor.getInterceptionStatus(),
+            api: apiMonitor?.getStatus() ?? {
+                running: false,
+                configured: !!(0, settings_1.getApiKey)(),
+                lastBalanceAt: 0,
+                lastUsageAt: 0,
+                lastError: '',
+                lastEntryCount: 0,
+            },
+            local: localMonitor?.getStatus() ?? {
+                running: false,
+                configured: false,
+                lastScanAt: 0,
+                lastError: '',
+                lastEntryCount: 0,
+            },
+        }));
+        context.subscriptions.push(statusBar);
         console.log('[DeepSeek Monitor] ✅ StatusBar 已创建');
     }
     catch (e) {
@@ -82,6 +100,7 @@ function activate(context) {
             fallback.command = 'deepseekMonitor.showDashboard';
             fallback.show();
             statusBar = fallback;
+            context.subscriptions.push(statusBar);
         }
         catch { /* 彻底放弃 */ }
     }
@@ -142,7 +161,24 @@ function activate(context) {
         console.error('[DeepSeek Monitor] ❌ 监控器初始化失败:', e);
     }
     // ---- Dashboard Webview ----
-    dashboardProvider = new dashboardPanel_1.DashboardPanel(tracker, context.extensionUri);
+    dashboardProvider = new dashboardPanel_1.DashboardPanel(tracker, storage, context.extensionUri, () => ({
+        http: interceptor.getInterceptionStatus(),
+        api: apiMonitor?.getStatus() ?? {
+            running: false,
+            configured: false,
+            lastBalanceAt: 0,
+            lastUsageAt: 0,
+            lastError: 'API 监控器未初始化',
+            lastEntryCount: 0,
+        },
+        local: localMonitor?.getStatus() ?? {
+            running: false,
+            configured: false,
+            lastScanAt: 0,
+            lastError: '本地扫描器未初始化',
+            lastEntryCount: 0,
+        },
+    }));
     context.subscriptions.push(vscode.window.registerWebviewViewProvider('deepseekMonitor.dashboard', dashboardProvider));
     // ---- Commands ----
     context.subscriptions.push(vscode.commands.registerCommand('deepseekMonitor.showDashboard', () => {
@@ -205,6 +241,8 @@ function activate(context) {
 function deactivate() {
     stopAllMonitors();
     interceptor.stopInterception();
+    statusBar?.dispose();
+    statusBar = undefined;
     console.log('[DeepSeek Monitor] 👋 已停止');
 }
 // ---- 内部函数 ----
@@ -251,8 +289,8 @@ function startAllMonitors() {
     localMonitor.start(registry_1.registry.getLocalProviders());
 }
 function stopAllMonitors() {
-    apiMonitor.stop();
-    localMonitor.stop();
+    apiMonitor?.stop();
+    localMonitor?.stop();
 }
 async function exportReport() {
     const stats = tracker.getStats();

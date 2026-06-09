@@ -17,6 +17,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.startInterception = startInterception;
 exports.stopInterception = stopInterception;
 exports.isIntercepting = isIntercepting;
+exports.getInterceptionStatus = getInterceptionStatus;
 exports.updatePricing = updatePricing;
 // 使用 require 直接访问 Node.js 模块缓存（确保 patch 对所有扩展生效）
 const httpsModule = require('https');
@@ -59,6 +60,11 @@ const DEFAULT_PRICING = {
 let originalHttpsRequest;
 let interceptEnabled = false;
 let onUsageDetected = null;
+let lastRequestAt = 0;
+let lastUsageAt = 0;
+let seenRequests = 0;
+let parsedUsages = 0;
+let missingUsageResponses = 0;
 /** 去重 —— 防止同一个请求被记录多次 */
 const seenFingerprints = new Set();
 const MAX_FINGERPRINTS = 5000;
@@ -108,6 +114,16 @@ function stopInterception() {
 function isIntercepting() {
     return interceptEnabled;
 }
+function getInterceptionStatus() {
+    return {
+        running: interceptEnabled,
+        lastRequestAt,
+        lastUsageAt,
+        seenRequests,
+        parsedUsages,
+        missingUsageResponses,
+    };
+}
 function updatePricing(pricing) {
     customPricing = { ...pricing };
 }
@@ -137,6 +153,8 @@ function createInterceptor() {
             return originalHttpsRequest.apply(this, args);
         }
         // ---- 拦截目标请求 ----
+        seenRequests += 1;
+        lastRequestAt = Date.now();
         let requestBody = '';
         let model = 'unknown';
         // 创建请求
@@ -178,7 +196,12 @@ function createInterceptor() {
                 // 尝试提取 usage 数据
                 const entry = extractUsage(responseBody, model, hostname, pathname);
                 if (entry) {
+                    parsedUsages += 1;
+                    lastUsageAt = Date.now();
                     processEntry(entry);
+                }
+                else {
+                    missingUsageResponses += 1;
                 }
             });
             res.on('error', () => {

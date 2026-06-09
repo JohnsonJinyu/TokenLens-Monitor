@@ -12,6 +12,10 @@ export class ApiMonitor {
   private usageInterval: ReturnType<typeof setInterval> | null = null;
   private running: boolean = false;
   private apiKey: string = '';
+  private lastBalanceAt: number = 0;
+  private lastUsageAt: number = 0;
+  private lastError: string = '';
+  private lastEntryCount: number = 0;
 
   /** 上次请求 ID 去重 */
   private seenRequestIds: Set<string> = new Set();
@@ -25,6 +29,7 @@ export class ApiMonitor {
     if (this.running) {return;}
     this.running = true;
     this.apiKey = getApiKey();
+    this.lastError = '';
 
     if (!this.apiKey || providers.length === 0) {
       console.log('[DeepSeek Monitor] API 监控未启动：缺少 API Key 或没有 API 提供商');
@@ -66,8 +71,10 @@ export class ApiMonitor {
         const balance = await provider.fetchBalance(this.apiKey);
         if (balance) {
           this.tracker.updateBalance(provider.id, balance);
+          this.lastBalanceAt = Date.now();
         }
       } catch (e) {
+        this.lastError = e instanceof Error ? e.message : String(e);
         console.error(`[DeepSeek Monitor] ${provider.id} 余额查询失败:`, e);
       }
     }
@@ -89,7 +96,10 @@ export class ApiMonitor {
         if (newEntries.length > 0) {
           this.tracker.recordUsage(newEntries);
         }
+        this.lastUsageAt = Date.now();
+        this.lastEntryCount = newEntries.length;
       } catch (e) {
+        this.lastError = e instanceof Error ? e.message : String(e);
         console.error(`[DeepSeek Monitor] ${provider.id} 用量查询失败:`, e);
       }
     }
@@ -111,5 +121,23 @@ export class ApiMonitor {
 
   get isRunning(): boolean {
     return this.running;
+  }
+
+  getStatus(): {
+    running: boolean;
+    configured: boolean;
+    lastBalanceAt: number;
+    lastUsageAt: number;
+    lastError: string;
+    lastEntryCount: number;
+  } {
+    return {
+      running: this.running,
+      configured: !!this.apiKey,
+      lastBalanceAt: this.lastBalanceAt,
+      lastUsageAt: this.lastUsageAt,
+      lastError: this.lastError,
+      lastEntryCount: this.lastEntryCount,
+    };
   }
 }

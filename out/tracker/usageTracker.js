@@ -45,6 +45,7 @@ class UsageTracker {
             // 按模型统计
             if (!session.byModel[entry.model]) {
                 session.byModel[entry.model] = {
+                    provider: entry.provider,
                     promptTokens: 0,
                     completionTokens: 0,
                     cost: 0,
@@ -54,6 +55,7 @@ class UsageTracker {
                 };
             }
             const m = session.byModel[entry.model];
+            m.provider = entry.provider;
             m.promptTokens += entry.promptTokens;
             m.completionTokens += entry.completionTokens;
             m.cost += entry.cost;
@@ -75,20 +77,21 @@ class UsageTracker {
         const balanceCache = this.storage.getBalanceCache();
         // 构建 ProviderStats
         const byProvider = new Map();
+        const makeProviderStats = (provider) => ({
+            provider,
+            totalPromptTokens: 0,
+            totalCompletionTokens: 0,
+            totalCost: 0,
+            totalRequests: 0,
+            cacheHitRate: 0,
+            byModel: new Map(),
+            balance: balanceCache[provider]?.info,
+        });
         for (const [model, m] of Object.entries(session.byModel)) {
-            // 简易推导 provider：从模型名推断
-            const provider = model.includes('deepseek') ? 'DeepSeek' : 'Other';
+            // 旧版本持久化数据没有 provider 字段，保留模型名推断作为兼容兜底。
+            const provider = m.provider ?? (model.includes('deepseek') ? 'DeepSeek' : 'Other');
             if (!byProvider.has(provider)) {
-                byProvider.set(provider, {
-                    provider,
-                    totalPromptTokens: 0,
-                    totalCompletionTokens: 0,
-                    totalCost: 0,
-                    totalRequests: 0,
-                    cacheHitRate: 0,
-                    byModel: new Map(),
-                    balance: balanceCache[provider]?.info,
-                });
+                byProvider.set(provider, makeProviderStats(provider));
             }
             const ps = byProvider.get(provider);
             ps.totalPromptTokens += m.promptTokens;
@@ -108,6 +111,13 @@ class UsageTracker {
             if (providerTotal > 0) {
                 const providerHit = Array.from(ps.byModel.values()).reduce((a, v) => a + v.cacheHitTokens, 0);
                 ps.cacheHitRate = (providerHit / providerTotal) * 100;
+            }
+        }
+        // 余额查询可能先于任何请求完成。不要因为暂无用量就丢掉 provider，
+        // 否则面板会一直停留在引导态，看不到余额和运行状态。
+        for (const [provider] of Object.entries(balanceCache)) {
+            if (!byProvider.has(provider)) {
+                byProvider.set(provider, makeProviderStats(provider));
             }
         }
         // 全局缓存命中率

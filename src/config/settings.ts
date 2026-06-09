@@ -79,7 +79,7 @@ export function getLocalMonitorPaths(): string[] {
 }
 
 // ---- Pricing ----
-export function getPricing(): Record<string, { input: number; output: number; currency: string }> {
+export function getPricing(): Record<string, { input: number; output: number; currency: string; cacheHitDiscount?: number }> {
   return vscode.workspace.getConfiguration(SECTION).get<Record<string, any>>('pricing', {});
 }
 

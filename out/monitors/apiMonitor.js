@@ -11,6 +11,10 @@ class ApiMonitor {
         this.usageInterval = null;
         this.running = false;
         this.apiKey = '';
+        this.lastBalanceAt = 0;
+        this.lastUsageAt = 0;
+        this.lastError = '';
+        this.lastEntryCount = 0;
         /** 上次请求 ID 去重 */
         this.seenRequestIds = new Set();
         this.tracker = tracker;
@@ -22,6 +26,7 @@ class ApiMonitor {
         }
         this.running = true;
         this.apiKey = (0, settings_1.getApiKey)();
+        this.lastError = '';
         if (!this.apiKey || providers.length === 0) {
             console.log('[DeepSeek Monitor] API 监控未启动：缺少 API Key 或没有 API 提供商');
             return;
@@ -61,9 +66,11 @@ class ApiMonitor {
                 const balance = await provider.fetchBalance(this.apiKey);
                 if (balance) {
                     this.tracker.updateBalance(provider.id, balance);
+                    this.lastBalanceAt = Date.now();
                 }
             }
             catch (e) {
+                this.lastError = e instanceof Error ? e.message : String(e);
                 console.error(`[DeepSeek Monitor] ${provider.id} 余额查询失败:`, e);
             }
         }
@@ -85,8 +92,11 @@ class ApiMonitor {
                 if (newEntries.length > 0) {
                     this.tracker.recordUsage(newEntries);
                 }
+                this.lastUsageAt = Date.now();
+                this.lastEntryCount = newEntries.length;
             }
             catch (e) {
+                this.lastError = e instanceof Error ? e.message : String(e);
                 console.error(`[DeepSeek Monitor] ${provider.id} 用量查询失败:`, e);
             }
         }
@@ -105,6 +115,16 @@ class ApiMonitor {
     }
     get isRunning() {
         return this.running;
+    }
+    getStatus() {
+        return {
+            running: this.running,
+            configured: !!this.apiKey,
+            lastBalanceAt: this.lastBalanceAt,
+            lastUsageAt: this.lastUsageAt,
+            lastError: this.lastError,
+            lastEntryCount: this.lastEntryCount,
+        };
     }
 }
 exports.ApiMonitor = ApiMonitor;

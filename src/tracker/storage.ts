@@ -17,6 +17,7 @@ export interface SessionStats {
   totalRequests: number;
   /** 按模型分组 */
   byModel: Record<string, {
+    provider?: string;
     promptTokens: number;
     completionTokens: number;
     cost: number;

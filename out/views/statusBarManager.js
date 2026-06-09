@@ -1,14 +1,7 @@
 "use strict";
 /**
- * 状态栏管理器 —— 右下角纯数据展示，无功能描述文字。
- *
- * 格式参考 DeepSeek Pilot：
- *  无数据:  "✨ ¥0"
- *  有数据:  "✨ ¥0.15 · 1.2k t · 85% ⇢ · 52% ctx"
- *  上下文告警: 背景变色
- *
- * 悬停: 完整用量 + 余额表格
- * 点击: 打开仪表板
+ * 状态栏管理器。
+ * 本体保持紧凑，tooltip 展示余额、Token、缓存、上下文和数据源健康。
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -48,50 +41,47 @@ exports.StatusBarManager = void 0;
 const vscode = __importStar(require("vscode"));
 const settings_1 = require("../config/settings");
 class StatusBarManager {
-    constructor(tracker) {
+    constructor(tracker, storage, getMonitorStatus) {
         this.lastAlertedCost = 0;
         this.tracker = tracker;
+        this.storage = storage;
+        this.getMonitorStatus = getMonitorStatus;
         this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
         this.item.name = 'DeepSeek Monitor';
         this.item.command = 'deepseekMonitor.showDashboard';
-        // 初始：纯数据，¥0
         this.item.text = '$(pulse) ¥0';
         this.item.tooltip = this.buildTooltip(null);
         this.item.backgroundColor = undefined;
         this.item.show();
         this.tracker.onUpdate((stats) => this.refresh(stats));
+        this.refresh(this.tracker.getStats());
     }
-    /** 供外部调用（extension.ts 启动通知） */
     fmtCostStr(cost) {
-        return this.fmtCost(cost);
+        return this.fmtMoney(cost);
     }
-    // ============================================================
-    // 主刷新
-    // ============================================================
     refresh(stats) {
-        const display = (0, settings_1.getStatusBarDisplay)();
-        const { totalCost, totalTokens, totalRequests, globalCacheHitRate } = stats;
+        const primaryBalance = this.getPrimaryBalance(stats);
         const ctxPct = stats.lastContextPercent ?? 0;
-        const showCache = (0, settings_1.getShowCacheHitRate)() && display !== 'cost-only';
-        const showCtx = display.includes('context') && ctxPct > 0;
-        const showTokens = display !== 'cost-only';
-        // ---- 构建文本 ----
-        const parts = [];
-        const icon = totalRequests === 0 ? '$(pulse)' : '$(circuit-board)';
-        parts.push(`${icon} ${this.fmtCost(totalCost)}`);
-        if (showTokens) {
-            parts.push(`${this.fmtTokens(totalTokens)} t`);
+        const parts = ['$(pulse)'];
+        if (primaryBalance) {
+            parts.push(this.fmtMoney(primaryBalance.balance, primaryBalance.currency));
+            if (ctxPct > 0) {
+                parts.push(`${ctxPct}% ctx`);
+            }
+            else {
+                parts.push(this.fmtMoney(stats.totalCost));
+            }
         }
-        if (showCache && totalRequests > 0) {
-            parts.push(`${globalCacheHitRate.toFixed(0)}% ⇢`);
-        }
-        if (showCtx) {
-            const ctxIcon = ctxPct > (0, settings_1.getContextCriticalThreshold)() ? '$(error)'
-                : ctxPct > (0, settings_1.getContextWarnThreshold)() ? '$(warning)' : '';
-            parts.push(`${ctxIcon} ${ctxPct}% ctx`.trim());
+        else {
+            parts.push(this.fmtMoney(stats.totalCost));
+            parts.push(`${this.fmtTokens(stats.totalTokens)} t`);
         }
         this.item.text = parts.join(' · ');
-        // ---- 告警背景 ----
+        this.applyContextBackground(ctxPct);
+        this.maybeShowCostAlert(stats.totalCost);
+        this.item.tooltip = this.buildTooltip(stats);
+    }
+    applyContextBackground(ctxPct) {
         if (ctxPct > (0, settings_1.getContextCriticalThreshold)()) {
             this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
         }
@@ -101,11 +91,12 @@ class StatusBarManager {
         else {
             this.item.backgroundColor = undefined;
         }
-        // ---- 费用告警 ----
+    }
+    maybeShowCostAlert(totalCost) {
         const alertThreshold = (0, settings_1.getCostAlertThreshold)();
         if (alertThreshold > 0 && totalCost >= alertThreshold && totalCost > this.lastAlertedCost) {
             this.lastAlertedCost = totalCost;
-            vscode.window.showWarningMessage(`⚠️ 会话费用已达 ${this.fmtCost(totalCost)}`, '打开面板', '重置会话').then((choice) => {
+            vscode.window.showWarningMessage(`会话费用已达 ${this.fmtMoney(totalCost)}`, '打开面板', '重置会话').then((choice) => {
                 if (choice === '打开面板') {
                     vscode.commands.executeCommand('deepseekMonitor.showDashboard');
                 }
@@ -114,89 +105,119 @@ class StatusBarManager {
                 }
             });
         }
-        // ---- Tooltip ----
-        this.item.tooltip = this.buildTooltip(stats);
     }
-    // ============================================================
-    // Tooltip（统一，数据放在这里）
-    // ============================================================
     buildTooltip(stats) {
         const md = new vscode.MarkdownString();
-        md.supportHtml = true;
         md.isTrusted = true;
+        const status = this.safeMonitorStatus();
+        const history = this.storage.getUsageHistory();
+        const last24h = this.buildLast24h(history);
+        const cache = stats ? this.buildCacheSummary(stats) : { hitTokens: 0, missTokens: 0, hitRate: null };
+        const primaryBalance = stats ? this.getPrimaryBalance(stats) : undefined;
         const lines = [];
-        lines.push('### ✨ DeepSeek Monitor');
+        lines.push('### DeepSeek Monitor');
         lines.push('');
-        if (!stats || stats.totalRequests === 0) {
-            const hasApiKey = !!(0, settings_1.getApiKey)();
-            lines.push('| 功能 | 状态 |');
-            lines.push('|------|------|');
-            lines.push('| 🔍 请求拦截 | ✅ 运行中 |');
-            lines.push('| 📂 本地扫描 | ✅ 运行中 |');
-            lines.push(`| 🔑 API Key | ${hasApiKey ? '✅ 已配置' : '⏸ 未配置'} |`);
-            lines.push(`| 📊 余额查询 | ${hasApiKey ? '✅ 可用' : '⏸ 需 API Key'} |`);
-            lines.push('');
-            if (!hasApiKey) {
-                lines.push('💡 [设置 API Key](command:workbench.action.openSettings?deepseekMonitor.apiKey) 后可查余额');
-            }
-            lines.push('');
-            lines.push('_使用 AI 编程工具后，数据实时显示在这里_');
+        lines.push('| 指标 | 当前值 |');
+        lines.push('|------|--------|');
+        lines.push(`| 账户余额 | ${primaryBalance ? `**${this.fmtMoney(primaryBalance.balance, primaryBalance.currency)}** ${primaryBalance.provider}` : '未查询'} |`);
+        lines.push(`| 会话费用 | ${stats ? `**${this.fmtMoney(stats.totalCost)}**` : this.fmtMoney(0)} |`);
+        lines.push(`| 近 24h 费用 | ${this.fmtMoney(last24h.cost)} |`);
+        lines.push(`| Token | ${stats ? this.fmtTokens(stats.totalTokens) : '0'} |`);
+        lines.push(`| 请求数 | ${stats ? stats.totalRequests : 0} |`);
+        lines.push(`| 缓存命中率 | ${cache.hitRate == null ? '暂无缓存明细' : `${cache.hitRate.toFixed(1)}%`} |`);
+        lines.push(`| 上下文占比 | ${stats?.lastContextPercent ? `${stats.lastContextPercent}% ${stats.lastModel}` : '未捕获'} |`);
+        lines.push('');
+        lines.push('### 余额明细');
+        const balances = stats ? this.getBalances(stats) : [];
+        if (balances.length === 0) {
+            lines.push((0, settings_1.getApiKey)() ? '已配置 API Key，等待余额接口返回。' : '未配置 API Key，无法查询平台余额。');
         }
         else {
-            const ctxPct = stats.lastContextPercent ?? 0;
-            if (ctxPct > 0) {
-                const ctxEmoji = ctxPct > (0, settings_1.getContextCriticalThreshold)() ? '🔴'
-                    : ctxPct > (0, settings_1.getContextWarnThreshold)() ? '🟡' : '🟢';
-                lines.push(`> ${ctxEmoji} 上下文窗口 **${ctxPct}%** 已使用`);
-                if (ctxPct > (0, settings_1.getContextWarnThreshold)()) {
-                    lines.push('> ⚠️ 建议压缩对话或开启新会话');
-                }
-                lines.push('');
-            }
-            lines.push('| 指标 | 值 |');
-            lines.push('|------|----|');
-            lines.push(`| 💰 总费用 | **${this.fmtCost(stats.totalCost)}** |`);
-            lines.push(`| 📝 总 Tokens | ${this.fmtTokens(stats.totalTokens)} |`);
-            lines.push(`| 📨 请求数 | ${stats.totalRequests} |`);
-            lines.push(`| 🎯 缓存命中 | **${stats.globalCacheHitRate.toFixed(1)}%** |`);
-            lines.push(`| ⏱ 运行时长 | ${this.fmtDuration(stats.sessionDuration)} |`);
-            lines.push('');
-            for (const [, ps] of stats.byProvider) {
-                lines.push('---');
-                lines.push(`### 🔌 ${ps.provider}`);
-                lines.push('');
-                lines.push('| 模型 | 请求 | 输入 | 输出 | 费用 | 缓存 |');
-                lines.push('|------|------|------|------|------|------|');
-                for (const [model, m] of ps.byModel) {
-                    const totalCache = m.cacheHitTokens + m.cacheMissTokens;
-                    const hitStr = totalCache > 0 ? `${((m.cacheHitTokens / totalCache) * 100).toFixed(0)}%` : '-';
-                    lines.push(`| ${model} | ${m.requests} | ${this.fmtTokens(m.promptTokens)} | ${this.fmtTokens(m.completionTokens)} | ${this.fmtCost(m.cost)} | ${hitStr} |`);
-                }
-                if (ps.balance) {
-                    const b = ps.balance;
-                    lines.push('');
-                    lines.push(`💳 余额: **${this.fmtCost(b.balance)}** ${b.currency}`);
-                    if (b.giftBalance) {
-                        lines.push(`　🎁 赠送: ${this.fmtCost(b.giftBalance)} ${b.currency}`);
-                    }
-                }
-                lines.push('');
+            lines.push('| 服务商 | 剩余 | 已用 | 充值 | 赠送 | 更新时间 |');
+            lines.push('|--------|------|------|------|------|----------|');
+            for (const b of balances) {
+                lines.push(`| ${b.provider} | ${this.fmtMoney(b.balance, b.currency)} | ${this.fmtMoney(b.totalUsed, b.currency)} | ${this.fmtMoney(b.totalCharged, b.currency)} | ${b.giftBalance == null ? '-' : this.fmtMoney(b.giftBalance, b.currency)} | ${this.fmtTime(b.fetchedAt)} |`);
             }
         }
+        lines.push('');
+        lines.push('### 缓存与近 24h');
+        lines.push('| 指标 | 值 |');
+        lines.push('|------|----|');
+        lines.push(`| 缓存命中 Token | ${this.fmtTokens(cache.hitTokens)} |`);
+        lines.push(`| 缓存未命中 Token | ${this.fmtTokens(cache.missTokens)} |`);
+        lines.push(`| 近 24h Token | ${this.fmtTokens(last24h.tokens)} |`);
+        lines.push(`| 近 24h 请求 | ${last24h.requests} |`);
+        lines.push('');
+        lines.push('### 数据源健康');
+        lines.push('| 数据源 | 状态 | 最近信息 |');
+        lines.push('|--------|------|----------|');
+        lines.push(`| HTTP 拦截 | ${status.http.running ? '运行中' : '已关闭'} | 目标请求 ${status.http.seenRequests}，已解析 ${status.http.parsedUsages}，无 usage ${status.http.missingUsageResponses} |`);
+        lines.push(`| API 查询 | ${status.api.configured ? (status.api.lastError ? '异常' : '可用') : '未配置'} | ${status.api.lastError || `余额 ${this.fmtTime(status.api.lastBalanceAt)}，用量新增 ${status.api.lastEntryCount}`} |`);
+        lines.push(`| 本地扫描 | ${status.local.configured ? (status.local.lastError ? '异常' : '运行中') : '未配置'} | ${status.local.lastError || `扫描 ${this.fmtTime(status.local.lastScanAt)}，新增 ${status.local.lastEntryCount}`} |`);
         md.appendMarkdown(lines.join('\n'));
         return md;
     }
-    // ============================================================
-    // 格式化
-    // ============================================================
-    fmtCost(cost) {
-        if (cost < 0.01) {
-            return `¥${cost.toFixed(4)}`;
+    getPrimaryBalance(stats) {
+        return this.getBalances(stats)[0];
+    }
+    getBalances(stats) {
+        const rows = [];
+        for (const [provider, ps] of stats.byProvider) {
+            if (ps.balance) {
+                rows.push({ ...ps.balance, provider });
+            }
         }
-        if (cost < 1) {
-            return `¥${cost.toFixed(3)}`;
+        return rows.sort((a, b) => b.balance - a.balance);
+    }
+    buildCacheSummary(stats) {
+        let hitTokens = 0;
+        let missTokens = 0;
+        for (const [, ps] of stats.byProvider) {
+            for (const [, model] of ps.byModel) {
+                hitTokens += model.cacheHitTokens;
+                missTokens += model.cacheMissTokens;
+            }
         }
-        return `¥${cost.toFixed(2)}`;
+        const total = hitTokens + missTokens;
+        return {
+            hitTokens,
+            missTokens,
+            hitRate: total > 0 ? (hitTokens / total) * 100 : null,
+        };
+    }
+    buildLast24h(history) {
+        const since = Date.now() - 24 * 60 * 60 * 1000;
+        return history.filter((entry) => entry.timestamp >= since).reduce((acc, entry) => {
+            acc.requests += 1;
+            acc.tokens += entry.promptTokens + entry.completionTokens;
+            acc.cost += entry.cost;
+            return acc;
+        }, { requests: 0, tokens: 0, cost: 0 });
+    }
+    safeMonitorStatus() {
+        try {
+            return this.getMonitorStatus();
+        }
+        catch {
+            return {
+                http: { running: false, lastRequestAt: 0, lastUsageAt: 0, seenRequests: 0, parsedUsages: 0, missingUsageResponses: 0 },
+                api: { running: false, configured: false, lastBalanceAt: 0, lastUsageAt: 0, lastError: '状态不可用', lastEntryCount: 0 },
+                local: { running: false, configured: false, lastScanAt: 0, lastError: '状态不可用', lastEntryCount: 0 },
+            };
+        }
+    }
+    fmtMoney(value, currency = 'CNY') {
+        const symbol = currency === 'USD' ? '$' : '¥';
+        if (value === 0) {
+            return `${symbol}0`;
+        }
+        if (Math.abs(value) < 0.01) {
+            return `${symbol}${value.toFixed(4)}`;
+        }
+        if (Math.abs(value) < 1) {
+            return `${symbol}${value.toFixed(3)}`;
+        }
+        return `${symbol}${value.toFixed(2)}`;
     }
     fmtTokens(n) {
         if (n >= 1000000) {
@@ -205,15 +226,13 @@ class StatusBarManager {
         if (n >= 1000) {
             return `${(n / 1000).toFixed(1)}k`;
         }
-        return String(n);
+        return String(Math.round(n));
     }
-    fmtDuration(ms) {
-        const mins = Math.floor(ms / 60000);
-        const hrs = Math.floor(mins / 60);
-        if (hrs > 0) {
-            return `${hrs}h ${mins % 60}m`;
+    fmtTime(ts) {
+        if (!ts) {
+            return '从未';
         }
-        return `${mins}m`;
+        return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
     }
     dispose() {
         this.item.dispose();

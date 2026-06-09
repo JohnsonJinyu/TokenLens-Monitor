@@ -12,6 +12,10 @@ export class LocalMonitor {
   private tracker: UsageTracker;
   private scanInterval: ReturnType<typeof setInterval> | null = null;
   private running: boolean = false;
+  private configured: boolean = false;
+  private lastScanAt: number = 0;
+  private lastError: string = '';
+  private lastEntryCount: number = 0;
 
   /** 已扫描文件的 mtime 缓存，用于增量扫描 */
   private fileMTimes: Map<string, number> = new Map();
@@ -26,6 +30,7 @@ export class LocalMonitor {
     this.running = true;
 
     const localProviders = providers.filter((p) => p.config.type === 'local');
+    this.configured = localProviders.length > 0;
     if (localProviders.length === 0) {
       console.log('[DeepSeek Monitor] 本地监控未启动：没有本地提供商');
       return;
@@ -61,10 +66,13 @@ export class LocalMonitor {
         if (changedPaths.length === 0) {continue;}
 
         const entries = await provider.parseLocalUsage(changedPaths);
+        this.lastScanAt = Date.now();
+        this.lastEntryCount = entries.length;
         if (entries.length > 0) {
           this.tracker.recordUsage(entries);
         }
       } catch (e) {
+        this.lastError = e instanceof Error ? e.message : String(e);
         console.error(`[DeepSeek Monitor] ${provider.id} 本地扫描失败:`, e);
       }
     }
@@ -126,5 +134,21 @@ export class LocalMonitor {
 
   get isRunning(): boolean {
     return this.running;
+  }
+
+  getStatus(): {
+    running: boolean;
+    configured: boolean;
+    lastScanAt: number;
+    lastError: string;
+    lastEntryCount: number;
+  } {
+    return {
+      running: this.running,
+      configured: this.configured,
+      lastScanAt: this.lastScanAt,
+      lastError: this.lastError,
+      lastEntryCount: this.lastEntryCount,
+    };
   }
 }

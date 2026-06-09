@@ -70,6 +70,11 @@ const DEFAULT_PRICING: Record<string, PricingEntry> = {
 let originalHttpsRequest: typeof httpsModule.request;
 let interceptEnabled = false;
 let onUsageDetected: ((entry: UsageEntry) => void) | null = null;
+let lastRequestAt = 0;
+let lastUsageAt = 0;
+let seenRequests = 0;
+let parsedUsages = 0;
+let missingUsageResponses = 0;
 
 /** 去重 —— 防止同一个请求被记录多次 */
 const seenFingerprints = new Set<string>();
@@ -130,6 +135,24 @@ export function isIntercepting(): boolean {
   return interceptEnabled;
 }
 
+export function getInterceptionStatus(): {
+  running: boolean;
+  lastRequestAt: number;
+  lastUsageAt: number;
+  seenRequests: number;
+  parsedUsages: number;
+  missingUsageResponses: number;
+} {
+  return {
+    running: interceptEnabled,
+    lastRequestAt,
+    lastUsageAt,
+    seenRequests,
+    parsedUsages,
+    missingUsageResponses,
+  };
+}
+
 export function updatePricing(pricing: Record<string, PricingEntry>): void {
   customPricing = { ...pricing };
 }
@@ -165,6 +188,8 @@ function createInterceptor(): typeof httpsModule.request {
     }
 
     // ---- 拦截目标请求 ----
+    seenRequests += 1;
+    lastRequestAt = Date.now();
     let requestBody = '';
     let model = 'unknown';
 
@@ -213,7 +238,11 @@ function createInterceptor(): typeof httpsModule.request {
         // 尝试提取 usage 数据
         const entry = extractUsage(responseBody, model, hostname, pathname);
         if (entry) {
+          parsedUsages += 1;
+          lastUsageAt = Date.now();
           processEntry(entry);
+        } else {
+          missingUsageResponses += 1;
         }
       });
 

@@ -1,12 +1,11 @@
-/**
- * DeepSeek Monitor Dashboard — 侧栏仪表板前端
- * 功能：
- *  - 📊 监控面板: 概览卡片 / 图表 / 详细记录 / 空状态引导
- *  - ⚙️ 设置面板: 直接在面板中修改所有配置，无需打开配置文件
- */
+// DeepSeek Monitor Dashboard
 
-// ---- VSCode Webview API ----
 var vscode = typeof acquireVsCodeApi !== 'undefined' ? acquireVsCodeApi() : null;
+var gSnapshot = null;
+var gSettings = null;
+var gCurrentTab = 'monitor';
+var trendChart = null;
+var modelCostChart = null;
 
 function postMsg(type, payload) {
   if (vscode) {
@@ -14,272 +13,348 @@ function postMsg(type, payload) {
   }
 }
 
-// ---- 全局状态 ----
-var gData = null;
-var gChart = null;
-var gHasData = false;
-var gCurrentTab = 'monitor';
-
-// ---- 监听主进程消息 ----
 window.addEventListener('message', function (e) {
-  var msg = e.data;
-  switch (msg.type) {
-    case 'update':
-      gData = msg.data;
-      var hasData = gData && (gData.totalRequests > 0 || hasBalanceData(gData));
-      if (hasData !== gHasData) {
-        gHasData = hasData;
-        toggleView(hasData);
-      }
-      if (hasData) { renderAll(gData); }
-      break;
-    case 'settings':
-      applySettings(msg.data);
-      break;
-    case 'settingSaved':
-      showSaveStatus(msg.key, msg.success);
-      break;
+  var msg = e.data || {};
+  if (msg.type === 'snapshot') {
+    gSnapshot = normalizeSnapshot(msg.data);
+    renderDashboard();
+  } else if (msg.type === 'settings') {
+    gSettings = msg.data;
+    applySettings(msg.data);
+    renderDashboard();
+  } else if (msg.type === 'settingSaved') {
+    showSaveStatus(msg.key, msg.success);
   }
 });
 
-/** 检查是否有余额数据 */
-function hasBalanceData(data) {
-  if (data && data.byProvider) {
-    for (var i = 0; i < data.byProvider.length; i++) {
-      var p = data.byProvider[i];
-      if (p.balance && p.balance.balance > 0) { return true; }
-    }
-  }
-  return false;
-}
-
-// 通知主进程 webview 已就绪
 postMsg('ready');
 
-// ============================================================
-// 标签切换
-// ============================================================
 function switchTab(tab) {
   gCurrentTab = tab;
-  document.getElementById('tab-monitor').className = tab === 'monitor' ? 'nav-tab active' : 'nav-tab';
-  document.getElementById('tab-settings').className = tab === 'settings' ? 'nav-tab active' : 'nav-tab';
-  document.getElementById('panel-monitor').className = tab === 'monitor' ? '' : 'hidden';
-  document.getElementById('panel-settings').className = tab === 'settings' ? 'settings-panel' : 'hidden';
+  setClass('tab-monitor', tab === 'monitor' ? 'tab active' : 'tab');
+  setClass('tab-settings', tab === 'settings' ? 'tab active' : 'tab');
+  setClass('panel-monitor', tab === 'monitor' ? 'shell' : 'hidden');
+  setClass('panel-settings', tab === 'settings' ? 'settings-panel' : 'hidden');
   if (tab === 'settings') {
     postMsg('getSettings');
   }
 }
 
-// ============================================================
-// 视图切换
-// ============================================================
-function toggleView(hasData) {
-  var onboarding = document.getElementById('onboarding');
-  var panel = document.getElementById('data-panel');
-  if (hasData) {
-    if (onboarding) onboarding.classList.add('hidden');
-    if (panel) panel.classList.remove('hidden');
-  } else {
-    if (onboarding) onboarding.classList.remove('hidden');
-    if (panel) panel.classList.add('hidden');
-  }
+function renderDashboard() {
+  if (!gSnapshot || gCurrentTab !== 'monitor') return;
+  safeRender('header', renderHeader);
+  safeRender('kpis', renderKpis);
+  safeRender('health', renderHealth);
+  safeRender('trend', renderTrend);
+  safeRender('modelCost', renderModelCost);
+  safeRender('providers', renderProviderTable);
+  safeRender('models', renderModelTable);
+  safeRender('history', renderHistoryTable);
 }
 
-// ============================================================
-// 监控面板渲染
-// ============================================================
-function renderAll(data) {
-  renderCards(data);
-  renderChart(data);
-  renderTable(data);
+function renderHeader(snapshot) {
+  var status = getOverallStatus(snapshot);
+  var pill = document.getElementById('overall-status');
+  if (pill) {
+    pill.innerHTML = '<span class="dot ' + status.cls + '"></span><span>' + escHtml(status.label) + '</span>';
+  }
+  setText('last-updated', '最后更新 ' + fmtTime(snapshot.generatedAt));
 }
 
-function renderCards(data) {
-  var container = document.getElementById('cards');
-  if (!container) return;
-  var hitRate = data.globalCacheHitRate != null ? data.globalCacheHitRate.toFixed(1) : '0.0';
-  var ctxPct = data.lastContextPercent || 0;
-  var hasUsage = (data.totalRequests || 0) > 0;
-
-  var cards = [];
-
-  // 如果有余额，优先显示余额卡片
-  if (data.byProvider) {
-    for (var i = 0; i < data.byProvider.length; i++) {
-      var p = data.byProvider[i];
-      if (p.balance && p.balance.balance > 0) {
-        cards.push({
-          cls: 'card-cost', icon: '💳', label: p.name + ' 余额',
-          value: fmtCost(p.balance.balance),
-          sub: (p.balance.giftBalance ? '含赠送 ' + fmtCost(p.balance.giftBalance) : '') + ' · ' + (p.balance.currency || 'CNY')
-        });
-      }
+function renderKpis(snapshot) {
+  var stats = snapshot.stats || {};
+  var balance = snapshot.balanceSummary && snapshot.balanceSummary.primary;
+  var cache = snapshot.cacheSummary || {};
+  var ctx = stats.lastContextPercent || 0;
+  var kpis = [
+    {
+      icon: '💳',
+      label: '账户余额',
+      value: balance ? fmtMoney(balance.balance, balance.currency) : '未查询',
+      sub: balance ? '更新时间 ' + fmtTime(balance.fetchedAt) : '配置 API Key 后显示余额',
+      lines: balance ? [
+        ['已用', fmtMoney(balance.totalUsed, balance.currency)],
+        ['充值', fmtMoney(balance.totalCharged, balance.currency)]
+      ] : []
+    },
+    {
+      icon: '🧾',
+      label: '已用金额',
+      value: balance ? fmtMoney(balance.totalUsed, balance.currency) : '未查询',
+      sub: balance ? '充值 ' + fmtMoney(balance.totalCharged, balance.currency) : '等待余额接口返回'
+    },
+    {
+      icon: '🎁',
+      label: '赠送余额',
+      value: balance && balance.giftBalance != null ? fmtMoney(balance.giftBalance, balance.currency) : '未返回',
+      sub: balance ? balance.provider : '余额接口未返回赠送字段'
+    },
+    {
+      icon: '💰',
+      label: '会话费用',
+      value: fmtMoney(stats.totalCost || 0),
+      sub: '近 24h ' + fmtMoney(snapshot.last24h.cost || 0)
+    },
+    {
+      icon: '🔢',
+      label: 'Token 用量',
+      value: fmtTokens(stats.totalTokens || 0),
+      sub: '近 24h ' + fmtTokens(snapshot.last24h.tokens || 0)
+    },
+    {
+      icon: '📨',
+      label: '请求数',
+      value: String(stats.totalRequests || 0),
+      sub: '近 24h ' + (snapshot.last24h.requests || 0) + ' 次'
+    },
+    {
+      icon: '🎯',
+      label: '缓存命中率',
+      value: cache.hitRate == null ? '未返回' : fmtPercent(cache.hitRate),
+      sub: cache.totalTokens ? '命中 ' + fmtTokens(cache.hitTokens) + ' / 未命中 ' + fmtTokens(cache.missTokens) : '暂无缓存明细',
+      progress: cache.hitRate == null ? null : clamp(cache.hitRate, 0, 100),
+      tone: cache.hitRate == null ? '' : cache.hitRate >= 60 ? 'good' : cache.hitRate >= 25 ? 'warn' : 'bad'
+    },
+    {
+      icon: '💸',
+      label: '缓存节省估算',
+      value: cache.estimatedSavings == null ? '未估算' : fmtMoney(cache.estimatedSavings),
+      sub: cache.estimatedSavings == null ? '仅支持有缓存折扣定价的模型' : '按配置定价粗略估算'
+    },
+    {
+      icon: '📐',
+      label: '上下文占比',
+      value: ctx > 0 ? fmtPercent(ctx) : '未捕获',
+      sub: stats.lastModel ? stats.lastModel : '等待下一次请求',
+      progress: ctx > 0 ? clamp(ctx, 0, 100) : null,
+      tone: ctx >= 85 ? 'bad' : ctx >= 70 ? 'warn' : 'good'
     }
-  }
+  ];
 
-  if (hasUsage) {
-    cards.push({ cls: 'card-cost',  icon: '💰', label: '会话费用',   value: fmtCost(data.totalCost || 0), sub: '' });
-    cards.push({ cls: 'card-token', icon: '📝', label: '总 Tokens',   value: fmtTokens(data.totalTokens || 0), sub: (data.totalRequests || 0) + ' 次请求' });
-    cards.push({ cls: 'card-cache', icon: '🎯', label: '缓存命中率',  value: hitRate + '%', sub: getCacheSub(data) });
+  var el = document.getElementById('kpi-grid');
+  if (!el) return;
+  el.innerHTML = kpis.map(function (kpi) {
+    return '<article class="card">'
+      + '<div class="label"><span class="kpi-icon">' + escHtml(kpi.icon || '') + '</span><span>' + escHtml(kpi.label) + '</span></div>'
+      + '<div class="value">' + escHtml(kpi.value) + '</div>'
+      + '<div class="sub">' + escHtml(kpi.sub) + '</div>'
+      + renderMetricLines(kpi.lines)
+      + renderProgress(kpi.progress, kpi.tone)
+      + '</article>';
+  }).join('');
+}
 
-    if (ctxPct > 0) {
-      var ctxColor = ctxPct > 85 ? 'var(--red)' : ctxPct > 70 ? 'var(--yellow)' : 'var(--green)';
-      cards.push({
-        cls: 'card-time', icon: '📐', label: '上下文窗口 (' + (data.lastModel || '') + ')',
-        value: '<span style="color:' + ctxColor + '">' + ctxPct + '%</span>',
-        sub: ctxPct > 85 ? '⚠️ 建议开启新会话' : ctxPct > 70 ? '⚡ 考虑压缩对话' : '✅ 窗口健康'
-      });
-    } else {
-      cards.push({
-        cls: 'card-time', icon: '⏱', label: '会话时长',
-        value: fmtDuration(data.sessionDuration || 0), sub: '自动监控中'
-      });
+function renderHealth(snapshot) {
+  var status = snapshot.monitorStatus || {};
+  var http = status.http || {};
+  var api = status.api || {};
+  var local = status.local || {};
+  var rows = [
+    {
+      name: 'HTTP 请求拦截',
+      state: http.running ? '运行中' : '已关闭',
+      cls: http.running ? 'good' : 'bad',
+      detail: http.seenRequests
+        ? '已看到 ' + http.seenRequests + ' 个目标请求，已解析 ' + http.parsedUsages + ' 条用量'
+        : '等待 VS Code 扩展发出 LLM API 请求'
+    },
+    {
+      name: 'API 查询',
+      state: api.configured ? (api.lastError ? '异常' : '可用') : '未配置',
+      cls: api.configured ? (api.lastError ? 'bad' : 'good') : 'warn',
+      detail: api.configured
+        ? (api.lastError || ('余额 ' + fmtTime(api.lastBalanceAt) + '，用量新增 ' + (api.lastEntryCount || 0) + ' 条'))
+        : '配置 API Key 后可查询余额和平台用量'
+    },
+    {
+      name: '本地扫描',
+      state: local.configured ? (local.lastError ? '异常' : '运行中') : '未配置',
+      cls: local.configured ? (local.lastError ? 'bad' : 'good') : 'warn',
+      detail: local.configured
+        ? (local.lastError || ('最近扫描 ' + fmtTime(local.lastScanAt) + '，新增 ' + (local.lastEntryCount || 0) + ' 条'))
+        : '可在设置中配置本地日志路径'
     }
-  } else {
-    // 无用量数据但有余额时，显示状态卡片
-    cards.push({
-      cls: 'card-token', icon: '📝', label: '用量状态',
-      value: '等待请求',
-      sub: '使用 AI 工具后自动出现'
-    });
-    cards.push({
-      cls: 'card-cache', icon: '🔍', label: 'HTTP 拦截',
-      value: '运行中',
-      sub: '自动捕获 LLM API 调用'
-    });
-  }
+  ];
 
-  container.innerHTML = cards.map(function (c) {
-    return '<div class="card ' + c.cls + '">'
-      + '<div class="card-icon">' + c.icon + '</div>'
-      + '<div class="card-label">' + c.label + '</div>'
-      + '<div class="card-value">' + c.value + '</div>'
-      + (c.sub ? '<div class="card-sub">' + c.sub + '</div>' : '')
+  setText('health-meta', (snapshot.recentHistory || []).length ? '最近有请求记录' : '等待请求');
+  var el = document.getElementById('health-list');
+  if (!el) return;
+  el.innerHTML = rows.map(function (row) {
+    return '<div class="health-row">'
+      + '<span class="dot ' + row.cls + '"></span>'
+      + '<div class="health-main">'
+      + '<div class="health-name">' + escHtml(row.name) + '</div>'
+      + '<div class="health-detail">' + escHtml(row.detail) + '</div>'
+      + '</div>'
+      + '<div class="health-state">' + escHtml(row.state) + '</div>'
       + '</div>';
   }).join('');
 }
 
-function getCacheSub(data) {
-  var total = 0, hit = 0;
-  if (data.byProvider) {
-    for (var i = 0; i < data.byProvider.length; i++) {
-      var p = data.byProvider[i];
-      if (p.byModel) {
-        for (var j = 0; j < p.byModel.length; j++) {
-          var m = p.byModel[j];
-          hit += (m.cacheHitTokens || 0);
-          total += (m.cacheHitTokens || 0) + (m.cacheMissTokens || 0);
-        }
-      }
-    }
-  }
-  return total > 0 ? '命中 ' + fmtTokens(hit) + ' / ' + fmtTokens(total) : '暂无缓存数据';
-}
+function renderTrend(snapshot) {
+  var rows = snapshot.trend || [];
+  var hasData = rows.some(function (r) { return r.requests > 0 || r.tokens > 0 || r.cost > 0; });
+  toggleChart('trend-wrap', 'trend-empty', hasData);
+  setText('trend-meta', hasData ? '请求 ' + snapshot.last24h.requests + ' 次' : '暂无数据');
+  destroyChart('trend');
+  if (!hasData || typeof Chart === 'undefined') return;
 
-function renderChart(data) {
-  var ctx = document.getElementById('costChart');
-  if (!ctx) return;
-  var labels = [], values = [], colors = [];
-  var palette = ['#89b4fa', '#a6e3a1', '#f9e2af', '#f38ba8', '#cba6f7', '#94e2d5', '#fab387', '#89dceb'];
-  var idx = 0;
-  if (data.byProvider) {
-    for (var i = 0; i < data.byProvider.length; i++) {
-      var provider = data.byProvider[i];
-      if (provider.byModel) {
-        for (var j = 0; j < provider.byModel.length; j++) {
-          var m = provider.byModel[j];
-          labels.push(m.model);
-          values.push(m.cost || 0);
-          colors.push(palette[idx % palette.length]);
-          idx++;
-        }
-      }
-    }
+  var ctx = document.getElementById('trendChart');
+  if (!ctx) {
+    toggleChart('trend-wrap', 'trend-empty', false);
+    return;
   }
-  if (gChart) { gChart.destroy(); gChart = null; }
-  if (labels.length === 0) return;
-
-  gChart = new Chart(ctx, {
-    type: 'bar',
+  trendChart = new Chart(ctx, {
+    type: 'line',
     data: {
-      labels: labels,
-      datasets: [{
-        label: '费用 (¥)',
-        data: values,
-        backgroundColor: colors,
-        borderRadius: 6,
-        borderSkipped: false,
-      }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#1e1e2e', titleColor: '#cdd6f4', bodyColor: '#a6adc8',
-          borderColor: '#45475a', borderWidth: 1, cornerRadius: 6,
-          callbacks: { label: function (c) { return ' ¥' + c.raw.toFixed(4); } },
+      labels: rows.map(function (r) { return r.label + ':00'; }),
+      datasets: [
+        {
+          label: '费用',
+          data: rows.map(function (r) { return round(r.cost, 6); }),
+          borderColor: cssVar('--chart-a'),
+          backgroundColor: 'rgba(79, 140, 255, 0.16)',
+          borderWidth: 2,
+          tension: 0.35,
+          fill: true,
+          yAxisID: 'cost'
         },
-      },
-      scales: {
-        x: { ticks: { color: '#a6adc8', font: { size: 10 } }, grid: { color: 'rgba(69,71,90,0.3)' } },
-        y: {
-          beginAtZero: true,
-          ticks: { color: '#a6adc8', font: { size: 10 }, callback: function (v) { return '¥' + v.toFixed(2); } },
-          grid: { color: 'rgba(69,71,90,0.2)' },
-        },
-      },
+        {
+          label: 'Tokens',
+          data: rows.map(function (r) { return r.tokens; }),
+          borderColor: cssVar('--chart-b'),
+          backgroundColor: 'rgba(53, 196, 106, 0.12)',
+          borderWidth: 2,
+          tension: 0.35,
+          fill: false,
+          yAxisID: 'tokens'
+        }
+      ]
     },
+    options: chartOptions({
+      cost: { position: 'left', ticks: { callback: function (v) { return fmtMoney(v); } } },
+      tokens: { position: 'right', grid: { drawOnChartArea: false }, ticks: { callback: function (v) { return fmtTokens(v); } } }
+    })
   });
 }
 
-function renderTable(data) {
-  var container = document.getElementById('model-table');
-  if (!container) return;
-  var rows = '';
-  if (data.byProvider) {
-    for (var i = 0; i < data.byProvider.length; i++) {
-      var provider = data.byProvider[i];
-      if (provider.balance && provider.balance.balance > 0) {
-        rows += '<tr><td colspan="6" style="background:var(--card); padding:9px 8px; font-weight:600;">'
-          + '🔌 ' + escHtml(provider.name)
-          + '  <span style="font-weight:400;color:var(--muted);">| 余额: '
-          + fmtCost(provider.balance.balance) + ' ' + (provider.balance.currency || '')
-          + (provider.balance.giftBalance ? ' (赠送 ' + fmtCost(provider.balance.giftBalance) + ')' : '')
-          + '</span></td></tr>';
-      }
-      if (provider.byModel) {
-        for (var j = 0; j < provider.byModel.length; j++) {
-          var m = provider.byModel[j];
-          var hitRate = '-', badgeCls = '', rate = 0;
-          var total = (m.cacheHitTokens || 0) + (m.cacheMissTokens || 0);
-          if (total > 0) {
-            rate = ((m.cacheHitTokens || 0) / total) * 100;
-            hitRate = rate.toFixed(0) + '%';
-            badgeCls = rate >= 70 ? 'badge-good' : rate >= 40 ? 'badge-warn' : 'badge-poor';
-          }
-          rows += '<tr>'
-            + '<td>' + escHtml(m.model) + '</td>'
-            + '<td>' + (m.requests || 0) + '</td>'
-            + '<td>' + fmtTokens(m.promptTokens || 0) + '</td>'
-            + '<td>' + fmtTokens(m.completionTokens || 0) + '</td>'
-            + '<td style="font-weight:600;">' + fmtCost(m.cost || 0) + '</td>'
-            + '<td><span class="badge ' + badgeCls + '">' + hitRate + '</span></td>'
-            + '</tr>';
-        }
-      }
-    }
+function renderModelCost(snapshot) {
+  var rows = (snapshot.modelRows || []).filter(function (r) { return r.cost > 0 || r.totalTokens > 0; }).slice(0, 8);
+  var hasData = rows.length > 0;
+  toggleChart('model-chart-wrap', 'model-chart-empty', hasData);
+  setText('model-chart-meta', hasData ? rows.length + ' 个模型' : '暂无数据');
+  destroyChart('model');
+  if (!hasData || typeof Chart === 'undefined') return;
+
+  var ctx = document.getElementById('modelCostChart');
+  if (!ctx) {
+    toggleChart('model-chart-wrap', 'model-chart-empty', false);
+    return;
   }
-  container.innerHTML = '<table>'
-    + '<thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>费用</th><th>缓存命中</th></tr></thead>'
-    + '<tbody>' + (rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px;">暂无记录</td></tr>') + '</tbody>'
-    + '</table>';
+  modelCostChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: rows.map(function (r) { return r.model; }),
+      datasets: [{
+        label: '费用',
+        data: rows.map(function (r) { return round(r.cost, 6); }),
+        backgroundColor: rows.map(function (_, i) {
+          return [cssVar('--chart-a'), cssVar('--chart-b'), cssVar('--chart-c'), cssVar('--chart-d')][i % 4];
+        }),
+        borderRadius: 5,
+        borderSkipped: false
+      }]
+    },
+    options: chartOptions({
+      y: { beginAtZero: true, ticks: { callback: function (v) { return fmtMoney(v); } } }
+    })
+  });
 }
 
-// ============================================================
-// 设置面板
-// ============================================================
+function renderProviderTable(snapshot) {
+  var rows = snapshot.providerRows || [];
+  setText('provider-meta', rows.length ? rows.length + ' 个服务商' : '暂无服务商数据');
+  var el = document.getElementById('provider-table');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">暂无服务商数据。配置 API Key 或捕获请求后会显示余额和用量。</div>';
+    return;
+  }
+  el.innerHTML = '<table><thead><tr>'
+    + '<th style="width:28%">服务商</th><th>余额</th><th>请求</th><th>Token</th><th>缓存</th>'
+    + '</tr></thead><tbody>'
+    + rows.map(function (r) {
+      var balance = r.balance ? fmtMoney(r.balance.balance, r.balance.currency) : '未查询';
+      var cache = (r.cacheHitTokens || r.cacheMissTokens) ? fmtPercent(r.cacheHitRate || 0) : '无明细';
+      return '<tr>'
+        + '<td title="' + escAttr(r.name) + '">' + escHtml(r.name) + '</td>'
+        + '<td>' + escHtml(balance) + '</td>'
+        + '<td>' + (r.requests || 0) + '</td>'
+        + '<td>' + fmtTokens(r.totalTokens || 0) + '</td>'
+        + '<td>' + escHtml(cache) + '</td>'
+        + '</tr>';
+    }).join('')
+    + '</tbody></table>';
+}
+
+function renderModelTable(snapshot) {
+  var rows = snapshot.modelRows || [];
+  setText('model-meta', rows.length ? rows.length + ' 个模型' : '暂无模型');
+  var el = document.getElementById('model-table');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">暂无模型用量。捕获到请求后会显示排行。</div>';
+    return;
+  }
+  el.innerHTML = '<table><thead><tr>'
+    + '<th style="width:30%">模型</th><th>请求</th><th>输入</th><th>输出</th><th>缓存</th><th>费用</th>'
+    + '</tr></thead><tbody>'
+    + rows.slice(0, 10).map(function (r) {
+      var cacheText = (r.cacheHitTokens || r.cacheMissTokens)
+        ? fmtTokens(r.cacheHitTokens || 0) + ' / ' + fmtTokens(r.cacheMissTokens || 0)
+        : '无明细';
+      return '<tr>'
+        + '<td title="' + escAttr(r.provider + ' / ' + r.model) + '">' + escHtml(r.model) + '</td>'
+        + '<td>' + r.requests + '</td>'
+        + '<td>' + fmtTokens(r.promptTokens) + '</td>'
+        + '<td>' + fmtTokens(r.completionTokens) + '</td>'
+        + '<td title="命中 / 未命中">' + escHtml(cacheText) + '</td>'
+        + '<td>' + fmtMoney(r.cost) + '</td>'
+        + '</tr>';
+    }).join('')
+    + '</tbody></table>';
+}
+
+function renderHistoryTable(snapshot) {
+  var rows = snapshot.recentHistory || [];
+  setText('history-meta', rows.length ? '最近 ' + rows.length + ' 条' : '暂无请求');
+  var el = document.getElementById('history-table');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">暂无最近请求。发起一次 LLM 调用后，这里会显示时间、模型、Token 和费用。</div>';
+    return;
+  }
+  el.innerHTML = '<table><thead><tr>'
+    + '<th style="width:22%">时间</th><th style="width:24%">模型</th><th>输入</th><th>输出</th><th>缓存</th><th>费用</th>'
+    + '</tr></thead><tbody>'
+    + rows.slice(0, 30).map(function (r) {
+      var cacheText = ((r.cacheHitTokens || 0) + (r.cacheMissTokens || 0)) > 0
+        ? fmtTokens(r.cacheHitTokens || 0) + ' / ' + fmtTokens(r.cacheMissTokens || 0)
+        : '无明细';
+      return '<tr>'
+        + '<td title="' + escAttr(fmtDateTime(r.timestamp)) + '">' + escHtml(fmtShortTime(r.timestamp)) + '</td>'
+        + '<td title="' + escAttr(r.provider + ' / ' + r.model + ' / ' + r.source) + '">' + escHtml(r.model || 'unknown') + '</td>'
+        + '<td>' + fmtTokens(r.promptTokens || 0) + '</td>'
+        + '<td>' + fmtTokens(r.completionTokens || 0) + '</td>'
+        + '<td title="命中 / 未命中">' + escHtml(cacheText) + '</td>'
+        + '<td>' + fmtMoney(r.cost || 0) + '</td>'
+        + '</tr>';
+    }).join('')
+    + '</tbody></table>';
+}
+
 function applySettings(settings) {
+  if (!settings) return;
   setField('setting-apiKey', settings.apiKey || '');
   setField('setting-apiBase', settings.apiBase || '');
   setField('setting-balanceCheckInterval', settings.balanceCheckInterval);
@@ -292,29 +367,9 @@ function applySettings(settings) {
   setField('setting-contextCriticalThreshold', settings.contextCriticalThreshold);
   setField('setting-costAlertThreshold', settings.costAlertThreshold);
   setField('setting-theme', settings.theme);
-
-  // 显示 API Key 状态
-  var statusEl = document.getElementById('api-key-status');
-  if (statusEl) {
-    statusEl.textContent = settings.apiKeyMasked
-      ? '当前: ' + settings.apiKeyMasked
-      : '未设置 API Key（仍可追踪用量，但无法查余额）';
-  }
+  setText('api-key-status', settings.apiKeyMasked ? '当前已配置：' + settings.apiKeyMasked : '未配置 API Key');
 }
 
-function setField(id, value) {
-  var el = document.getElementById(id);
-  if (el && value !== undefined && value !== null) {
-    el.value = value;
-  }
-}
-
-function setCheckbox(id, value) {
-  var el = document.getElementById(id);
-  if (el) { el.checked = !!value; }
-}
-
-/** 保存 API Key（特殊处理，需要隐藏值） */
 function saveApiKey() {
   var input = document.getElementById('setting-apiKey');
   if (!input) return;
@@ -326,44 +381,251 @@ function saveApiKey() {
   postMsg('saveSetting', { key: 'apiKey', value: val });
 }
 
-/** 保存单个设置 */
 function saveSetting(key, value) {
   postMsg('saveSetting', { key: key, value: value });
 }
 
 function showSaveStatus(key, success) {
-  var el = document.getElementById('api-key-status');
-  if (key === 'apiKey' && el) {
-    el.textContent = success ? '✅ 已保存' : '❌ 保存失败';
-    if (success) {
-      setTimeout(function () { el.textContent = ''; }, 2000);
-    }
+  if (key === 'apiKey') {
+    setText('api-key-status', success ? '已保存' : '保存失败');
   }
 }
 
-// ============================================================
-// 工具函数
-// ============================================================
-function fmtCost(cost) {
-  if (cost == null) return '¥0';
-  if (cost < 0.01) return '¥' + cost.toFixed(4);
-  if (cost < 1) return '¥' + cost.toFixed(3);
-  return '¥' + cost.toFixed(2);
+function normalizeSnapshot(raw) {
+  var snapshot = raw || {};
+  snapshot.stats = Object.assign({
+    totalCost: 0,
+    totalTokens: 0,
+    totalRequests: 0,
+    globalCacheHitRate: 0,
+    sessionDuration: 0,
+    lastContextPercent: 0,
+    lastModel: ''
+  }, snapshot.stats || {});
+  snapshot.last24h = Object.assign({
+    requests: 0,
+    tokens: 0,
+    cost: 0,
+    cacheHitTokens: 0,
+    cacheMissTokens: 0
+  }, snapshot.last24h || {});
+  snapshot.balanceSummary = Object.assign({
+    primary: null,
+    providers: []
+  }, snapshot.balanceSummary || {});
+  snapshot.cacheSummary = Object.assign({
+    hitTokens: 0,
+    missTokens: 0,
+    totalTokens: 0,
+    hitRate: null,
+    estimatedSavings: null
+  }, snapshot.cacheSummary || {});
+  snapshot.monitorStatus = Object.assign({
+    http: {},
+    api: {},
+    local: {}
+  }, snapshot.monitorStatus || {});
+  snapshot.monitorStatus.http = Object.assign({
+    running: false,
+    lastRequestAt: 0,
+    lastUsageAt: 0,
+    seenRequests: 0,
+    parsedUsages: 0,
+    missingUsageResponses: 0
+  }, snapshot.monitorStatus.http || {});
+  snapshot.monitorStatus.api = Object.assign({
+    running: false,
+    configured: false,
+    lastBalanceAt: 0,
+    lastUsageAt: 0,
+    lastError: '',
+    lastEntryCount: 0
+  }, snapshot.monitorStatus.api || {});
+  snapshot.monitorStatus.local = Object.assign({
+    running: false,
+    configured: false,
+    lastScanAt: 0,
+    lastError: '',
+    lastEntryCount: 0
+  }, snapshot.monitorStatus.local || {});
+  snapshot.providerRows = Array.isArray(snapshot.providerRows) ? snapshot.providerRows : [];
+  snapshot.modelRows = Array.isArray(snapshot.modelRows) ? snapshot.modelRows : [];
+  snapshot.recentHistory = Array.isArray(snapshot.recentHistory) ? snapshot.recentHistory : [];
+  snapshot.trend = Array.isArray(snapshot.trend) ? snapshot.trend : [];
+  snapshot.generatedAt = snapshot.generatedAt || Date.now();
+  return snapshot;
 }
-function fmtTokens(n) {
-  if (n == null) return '0';
+
+function safeRender(name, fn) {
+  try {
+    fn(gSnapshot);
+  } catch (err) {
+    console.error('[DeepSeek Monitor] render failed:', name, err);
+    renderFallback(name);
+  }
+}
+
+function renderFallback(name) {
+  var map = {
+    kpis: 'kpi-grid',
+    health: 'health-list',
+    providers: 'provider-table',
+    models: 'model-table',
+    history: 'history-table'
+  };
+  var id = map[name];
+  if (!id) return;
+  var el = document.getElementById(id);
+  if (el) {
+    el.innerHTML = '<div class="empty">该模块暂时无法渲染，其他监控数据仍可继续查看。</div>';
+  }
+}
+
+function renderMetricLines(lines) {
+  if (!lines || !lines.length) return '';
+  return lines.map(function (line) {
+    return '<div class="metric-line"><span>' + escHtml(line[0]) + '</span><span>' + escHtml(line[1]) + '</span></div>';
+  }).join('');
+}
+
+function renderProgress(value, tone) {
+  if (value == null || isNaN(value)) return '';
+  var pct = clamp(value, 0, 100);
+  return '<div class="meter" aria-hidden="true"><div class="meter-fill ' + escHtml(tone || '') + '" style="width:' + pct.toFixed(1) + '%"></div></div>';
+}
+
+function getOverallStatus(snapshot) {
+  var http = snapshot.monitorStatus && snapshot.monitorStatus.http;
+  var hasUsage = snapshot.stats && snapshot.stats.totalRequests > 0;
+  if (hasUsage) return { cls: 'good', label: '已捕获数据' };
+  if (http && http.running && http.seenRequests > 0) return { cls: 'warn', label: '请求无用量' };
+  if (http && http.running) return { cls: 'good', label: '监听中' };
+  return { cls: 'bad', label: '拦截关闭' };
+}
+
+function chartOptions(scales) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 250 },
+    plugins: {
+      legend: { labels: { color: cssVar('--muted'), boxWidth: 10, font: { size: 10 } } },
+      tooltip: {
+        backgroundColor: cssVar('--panel'),
+        titleColor: cssVar('--fg'),
+        bodyColor: cssVar('--muted'),
+        borderColor: cssVar('--border'),
+        borderWidth: 1
+      }
+    },
+    scales: Object.assign({
+      x: {
+        ticks: { color: cssVar('--muted'), font: { size: 10 }, maxRotation: 0, autoSkip: true },
+        grid: { color: 'rgba(130, 140, 160, 0.12)' }
+      }
+    }, scales || {})
+  };
+}
+
+function destroyChart(name) {
+  if (name === 'trend' && trendChart) {
+    trendChart.destroy();
+    trendChart = null;
+  }
+  if (name === 'model' && modelCostChart) {
+    modelCostChart.destroy();
+    modelCostChart = null;
+  }
+}
+
+function toggleChart(chartId, emptyId, hasData) {
+  var chart = document.getElementById(chartId);
+  var empty = document.getElementById(emptyId);
+  if (chart) chart.classList.toggle('hidden', !hasData);
+  if (empty) empty.classList.toggle('hidden', hasData);
+}
+
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function setClass(id, cls) {
+  var el = document.getElementById(id);
+  if (el) el.className = cls;
+}
+
+function setField(id, value) {
+  var el = document.getElementById(id);
+  if (el && value !== undefined && value !== null) {
+    el.value = value;
+  }
+}
+
+function setCheckbox(id, value) {
+  var el = document.getElementById(id);
+  if (el) el.checked = !!value;
+}
+
+function fmtMoney(value, currency) {
+  var n = Number(value || 0);
+  var symbol = currency === 'USD' ? '$' : '¥';
+  if (n === 0) return symbol + '0';
+  if (Math.abs(n) < 0.01) return symbol + n.toFixed(4);
+  if (Math.abs(n) < 1) return symbol + n.toFixed(3);
+  return symbol + n.toFixed(2);
+}
+
+function fmtTokens(value) {
+  var n = Number(value || 0);
   if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
-  return String(n);
+  return String(Math.round(n));
 }
-function fmtDuration(ms) {
-  if (!ms) return '0m';
-  var mins = Math.floor(ms / 60000);
-  var hrs = Math.floor(mins / 60);
-  if (hrs > 0) return hrs + 'h ' + (mins % 60) + 'm';
-  return mins + 'm';
+
+function fmtPercent(value) {
+  var n = Number(value || 0);
+  return n.toFixed(n >= 10 ? 0 : 1) + '%';
 }
+
+function fmtTime(ts) {
+  if (!ts) return '从未';
+  return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtShortTime(ts) {
+  if (!ts) return '-';
+  var d = new Date(ts);
+  return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) + ' ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtDateTime(ts) {
+  if (!ts) return '-';
+  return new Date(ts).toLocaleString('zh-CN');
+}
+
+function round(value, digits) {
+  var p = Math.pow(10, digits || 2);
+  return Math.round(Number(value || 0) * p) / p;
+}
+
+function clamp(value, min, max) {
+  var n = Number(value || 0);
+  return Math.max(min, Math.min(max, n));
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
 function escHtml(str) {
-  if (!str) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function escAttr(str) {
+  return escHtml(str).replace(/'/g, '&#39;');
 }
