@@ -1,0 +1,164 @@
+"use strict";
+/**
+ * OpenAI 兼容提供商 —— 通用适配层，支持所有兼容 OpenAI API 的服务。
+ * 适用于：硅基流动、智谱、百川、Moonshot、零一万物 等国产模型。
+ * 通过配置自定义 apiBase 和 pricing 来适配不同平台。
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.OpenAICompatProvider = void 0;
+const https = __importStar(require("https"));
+const base_1 = require("./base");
+function httpsGet(url, apiKey) {
+    return new Promise((resolve, reject) => {
+        const u = new URL(url);
+        const req = https.request({
+            hostname: u.hostname,
+            path: u.pathname + u.search,
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+        }, (res) => {
+            let body = '';
+            res.on('data', (chunk) => (body += chunk.toString()));
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(body));
+                }
+                catch {
+                    resolve(null);
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(15000, () => { req.destroy(); reject(new Error('请求超时')); });
+        req.end();
+    });
+}
+class OpenAICompatProvider extends base_1.BaseProvider {
+    constructor(config) {
+        super(config);
+    }
+    /**
+     * 尝试多种已知的余额查询端点
+     */
+    async fetchBalance(apiKey) {
+        const base = this.config.apiBase;
+        // 各平台余额端点不统一，尝试多个已知路径
+        const endpoints = [
+            '/v1/dashboard/billing/subscription',
+            '/dashboard/billing/subscription',
+            '/v1/billing/usage',
+            '/user/balance',
+            '/v1/balance',
+        ];
+        for (const ep of endpoints) {
+            try {
+                const data = await httpsGet(`${base}${ep}`, apiKey);
+                if (!data) {
+                    continue;
+                }
+                // OpenAI billing 格式
+                if (data.hard_limit_usd !== undefined) {
+                    return {
+                        totalCharged: data.hard_limit_usd,
+                        totalUsed: data.total_usage ?? data.total_used ?? 0,
+                        balance: (data.hard_limit_usd - (data.total_usage ?? 0)),
+                        currency: 'USD',
+                        fetchedAt: Date.now(),
+                    };
+                }
+                // DeepSeek 兼容格式
+                if (data.balance_infos) {
+                    const info = data.balance_infos[0];
+                    return {
+                        totalCharged: info.topped_up_balance,
+                        totalUsed: info.topped_up_balance - info.total_balance + (info.granted_balance || 0),
+                        balance: info.total_balance,
+                        giftBalance: info.granted_balance || 0,
+                        currency: info.currency || 'CNY',
+                        fetchedAt: Date.now(),
+                    };
+                }
+                // 通用格式
+                if (typeof data.total_balance === 'number') {
+                    return {
+                        totalCharged: data.total_top_up ?? data.total_balance + (data.total_usage ?? 0),
+                        totalUsed: data.total_usage ?? 0,
+                        balance: data.total_balance,
+                        currency: data.currency ?? 'CNY',
+                        fetchedAt: Date.now(),
+                    };
+                }
+            }
+            catch {
+                continue;
+            }
+        }
+        return null;
+    }
+    async fetchRecentUsage(apiKey, days = 7) {
+        try {
+            const endTime = Math.floor(Date.now() / 1000);
+            const startTime = endTime - days * 86400;
+            const base = this.config.apiBase;
+            const data = await httpsGet(`${base}/v1/usage?start_time=${startTime}&end_time=${endTime}&page_size=100`, apiKey);
+            const items = data?.data ?? [];
+            return items.map((item) => ({
+                timestamp: (item.created_at ?? item.timestamp ?? 0) * 1000,
+                provider: this.config.name,
+                model: item.model ?? 'unknown',
+                promptTokens: item.prompt_tokens ?? item.input_tokens ?? 0,
+                completionTokens: item.completion_tokens ?? item.output_tokens ?? 0,
+                cacheHitTokens: item.prompt_cache_hit_tokens ?? item.cache_hit_tokens ?? 0,
+                cacheMissTokens: item.prompt_cache_miss_tokens ?? item.cache_miss_tokens ?? 0,
+                cost: parseFloat(String(item.total_cost ?? item.cost ?? 0)) || 0,
+                endpoint: '/v1/chat/completions',
+            }));
+        }
+        catch (e) {
+            console.error(`[DeepSeek Monitor] 获取 ${this.config.name} 用量失败:`, e);
+            return [];
+        }
+    }
+    async parseLocalUsage(_paths) {
+        return [];
+    }
+}
+exports.OpenAICompatProvider = OpenAICompatProvider;
+//# sourceMappingURL=openaiCompat.js.map

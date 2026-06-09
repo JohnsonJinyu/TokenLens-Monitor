@@ -1,0 +1,199 @@
+{
+  "name": "deepseek-monitor",
+  "displayName": "DeepSeek Monitor — AI 用量 & 费用追踪",
+  "description": "自动拦截并统计 DeepSeek/OpenAI 等 LLM API 用量，实时显示费用、Token 消耗、上下文窗口占比和缓存命中率。状态栏 + 可视化面板，无需 API Key 即可追踪用量。",
+  "version": "0.1.0",
+  "publisher": "deepseek-monitor",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "deepseekMonitor.showDashboard",
+        "title": "DeepSeek Monitor: 打开用量面板",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "deepseekMonitor.refreshBalance",
+        "title": "DeepSeek Monitor: 刷新余额和用量",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "deepseekMonitor.toggleMonitor",
+        "title": "DeepSeek Monitor: 开启/暂停监控",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "deepseekMonitor.resetSession",
+        "title": "DeepSeek Monitor: 重置本次会话统计",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "deepseekMonitor.exportReport",
+        "title": "DeepSeek Monitor: 导出用量报告",
+        "icon": "$(export)"
+      }
+    ],
+    "configuration": {
+      "title": "DeepSeek Monitor",
+      "properties": {
+        "deepseekMonitor.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "DeepSeek API Key。配置后可查询平台余额和近期用量历史。不配置也能通过 HTTP 拦截自动追踪用量。"
+        },
+        "deepseekMonitor.providers": {
+          "type": "array",
+          "default": [
+            {
+              "name": "DeepSeek",
+              "type": "api",
+              "apiBase": "https://api.deepseek.com",
+              "models": ["deepseek-chat", "deepseek-reasoner"]
+            }
+          ],
+          "description": "要监控的 LLM 提供商列表。支持 OpenAI 兼容 API（硅基流动、智谱、通义千问等）。"
+        },
+        "deepseekMonitor.apiBase": {
+          "type": "string",
+          "default": "https://api.deepseek.com",
+          "description": "DeepSeek API 基础 URL。如使用代理或兼容端点可在此修改。"
+        },
+        "deepseekMonitor.balanceCheckInterval": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 60,
+          "description": "余额自动查询间隔（分钟）。"
+        },
+        "deepseekMonitor.usagePollInterval": {
+          "type": "number",
+          "default": 30,
+          "minimum": 10,
+          "maximum": 300,
+          "description": "用量数据轮询间隔（秒）。仅 API 模式生效。"
+        },
+        "deepseekMonitor.interceptEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用 HTTPS 请求拦截。自动捕获所有 VSCode 扩展发往 LLM API 的请求，实时追踪用量，无需 API Key。"
+        },
+        "deepseekMonitor.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "VSCode 启动时自动开始监控。"
+        },
+        "deepseekMonitor.pricing": {
+          "type": "object",
+          "default": {
+            "deepseek-chat": { "input": 1.0, "output": 2.0, "currency": "CNY", "cacheHitDiscount": 0.1 },
+            "deepseek-reasoner": { "input": 4.0, "output": 16.0, "currency": "CNY" }
+          },
+          "description": "自定义模型定价（每百万 tokens）。格式: {\"模型名\": {\"input\": 输入价格, \"output\": 输出价格, \"currency\": \"CNY\", \"cacheHitDiscount\": 缓存折扣比例}}"
+        },
+        "deepseekMonitor.contextWindowSizes": {
+          "type": "object",
+          "default": {
+            "deepseek-chat": 131072,
+            "deepseek-reasoner": 65536,
+            "gpt-4o": 131072,
+            "gpt-4o-mini": 131072,
+            "claude-3.5-sonnet": 200000
+          },
+          "description": "各模型的上下文窗口大小（tokens）。用于计算上下文窗口占比。"
+        },
+        "deepseekMonitor.contextWarnThreshold": {
+          "type": "number",
+          "default": 70,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "上下文窗口占比警告阈值（%）。超过此值状态栏变色提示。"
+        },
+        "deepseekMonitor.contextCriticalThreshold": {
+          "type": "number",
+          "default": 85,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "上下文窗口占比严重告警阈值（%）。超过此值状态栏变红。"
+        },
+        "deepseekMonitor.costAlertThreshold": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "description": "会话费用告警阈值（元）。超过此值弹出通知提醒。设为 0 关闭告警。"
+        },
+        "deepseekMonitor.statusBarDisplay": {
+          "type": "string",
+          "default": "cost-tokens-cache",
+          "enum": ["cost-only", "cost-tokens", "cost-tokens-cache", "cost-tokens-cache-context"],
+          "description": "状态栏显示内容。cost-only: 仅费用; cost-tokens: 费用+Token; cost-tokens-cache: 费用+Token+缓存命中; cost-tokens-cache-context: 全部信息含上下文占比。"
+        },
+        "deepseekMonitor.showNotificationOnUpdate": {
+          "type": "boolean",
+          "default": false,
+          "description": "余额或用量更新时弹出通知。"
+        },
+        "deepseekMonitor.localMonitorPaths": {
+          "type": "array",
+          "default": [],
+          "description": "额外本地缓存/日志文件路径（glob 格式）。用于解析 Continue/Cline/Aider 等工具的用量日志。"
+        },
+        "deepseekMonitor.maxLogEntries": {
+          "type": "number",
+          "default": 500,
+          "minimum": 50,
+          "maximum": 10000,
+          "description": "最多保留的请求日志条数。"
+        },
+        "deepseekMonitor.showCacheHitRate": {
+          "type": "boolean",
+          "default": true,
+          "description": "在状态栏和面板中显示缓存命中率。DeepSeek 缓存命中时输入价格仅 ¥0.1/M tokens。"
+        },
+        "deepseekMonitor.theme": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "dark", "light"],
+          "description": "仪表板面板主题。auto 跟随 VSCode 主题。"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deepseek-monitor-sidebar",
+          "title": "DeepSeek Monitor",
+          "icon": "$(dashboard)"
+        }
+      ]
+    },
+    "views": {
+      "deepseek-monitor-sidebar": [
+        {
+          "type": "webview",
+          "id": "deepseekMonitor.dashboard",
+          "name": "用量面板"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.82.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
