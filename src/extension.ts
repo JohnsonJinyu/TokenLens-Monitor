@@ -59,6 +59,21 @@ export function activate(context: vscode.ExtensionContext) {
   apiMonitor = new ApiMonitor(tracker);
   localMonitor = new LocalMonitor(tracker);
 
+  // ---- 立即扫描本地历史数据（不等定时器）----
+  const localProviders = registry.getLocalProviders();
+  if (localProviders.length > 0) {
+    console.log(`[DeepSeek Monitor] 发现 ${localProviders.length} 个本地数据源，立即扫描...`);
+    localMonitor.forceScanAll(localProviders).then(() => {
+      const stats = tracker.getStats();
+      console.log(`[DeepSeek Monitor] 初始扫描完成: ${stats.totalRequests} 条历史记录`);
+      if (stats.totalRequests > 0) {
+        vscode.window.showInformationMessage(
+          `🛰️ DeepSeek Monitor: 已加载 ${stats.totalRequests} 条历史记录`
+        );
+      }
+    });
+  }
+
   // ---- StatusBar ----
   statusBar = new StatusBarManager(tracker);
 

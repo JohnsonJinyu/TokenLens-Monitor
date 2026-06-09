@@ -82,6 +82,18 @@ function activate(context) {
     // ---- Monitors (API 轮询 + 本地扫描作为补充) ----
     apiMonitor = new apiMonitor_1.ApiMonitor(tracker);
     localMonitor = new localMonitor_1.LocalMonitor(tracker);
+    // ---- 立即扫描本地历史数据（不等定时器）----
+    const localProviders = registry_1.registry.getLocalProviders();
+    if (localProviders.length > 0) {
+        console.log(`[DeepSeek Monitor] 发现 ${localProviders.length} 个本地数据源，立即扫描...`);
+        localMonitor.forceScanAll(localProviders).then(() => {
+            const stats = tracker.getStats();
+            console.log(`[DeepSeek Monitor] 初始扫描完成: ${stats.totalRequests} 条历史记录`);
+            if (stats.totalRequests > 0) {
+                vscode.window.showInformationMessage(`🛰️ DeepSeek Monitor: 已加载 ${stats.totalRequests} 条历史记录`);
+            }
+        });
+    }
     // ---- StatusBar ----
     statusBar = new statusBarManager_1.StatusBarManager(tracker);
     // ---- Dashboard Webview ----

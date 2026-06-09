@@ -1,12 +1,8 @@
 /**
  * DeepSeek Monitor Dashboard — 侧栏仪表板前端
- * 使用 Chart.js 渲染图表，实时展示用量数据。
- *
  * 功能：
- *  - 空状态引导页（无数据时）
- *  - 概览卡片（费用 / Token / 缓存命中率 / 会话时长）
- *  - 柱状图（各模型费用分布）
- *  - 详细记录表格
+ *  - 📊 监控面板: 概览卡片 / 图表 / 详细记录 / 空状态引导
+ *  - ⚙️ 设置面板: 直接在面板中修改所有配置，无需打开配置文件
  */
 
 // ---- VSCode Webview API ----
@@ -22,27 +18,50 @@ function postMsg(type, payload) {
 var gData = null;
 var gChart = null;
 var gHasData = false;
+var gCurrentTab = 'monitor';
 
 // ---- 监听主进程消息 ----
 window.addEventListener('message', function (e) {
   var msg = e.data;
-  if (msg.type === 'update') {
-    gData = msg.data;
-    var hasData = gData && gData.totalRequests > 0;
-    if (hasData !== gHasData) {
-      gHasData = hasData;
-      toggleView(hasData);
-    }
-    if (hasData) {
-      renderAll(gData);
-    }
+  switch (msg.type) {
+    case 'update':
+      gData = msg.data;
+      var hasData = gData && gData.totalRequests > 0;
+      if (hasData !== gHasData) {
+        gHasData = hasData;
+        toggleView(hasData);
+      }
+      if (hasData) { renderAll(gData); }
+      break;
+    case 'settings':
+      applySettings(msg.data);
+      break;
+    case 'settingSaved':
+      showSaveStatus(msg.key, msg.success);
+      break;
   }
 });
 
 // 通知主进程 webview 已就绪
 postMsg('ready');
 
-// ---- 视图切换 ----
+// ============================================================
+// 标签切换
+// ============================================================
+function switchTab(tab) {
+  gCurrentTab = tab;
+  document.getElementById('tab-monitor').className = tab === 'monitor' ? 'nav-tab active' : 'nav-tab';
+  document.getElementById('tab-settings').className = tab === 'settings' ? 'nav-tab active' : 'nav-tab';
+  document.getElementById('panel-monitor').className = tab === 'monitor' ? '' : 'hidden';
+  document.getElementById('panel-settings').className = tab === 'settings' ? 'settings-panel' : 'hidden';
+  if (tab === 'settings') {
+    postMsg('getSettings');
+  }
+}
+
+// ============================================================
+// 视图切换
+// ============================================================
 function toggleView(hasData) {
   var onboarding = document.getElementById('onboarding');
   var panel = document.getElementById('data-panel');
@@ -55,20 +74,18 @@ function toggleView(hasData) {
   }
 }
 
-// ---- 主渲染入口 ----
+// ============================================================
+// 监控面板渲染
+// ============================================================
 function renderAll(data) {
   renderCards(data);
   renderChart(data);
   renderTable(data);
 }
 
-// ============================================================
-// 概览卡片
-// ============================================================
 function renderCards(data) {
   var container = document.getElementById('cards');
   if (!container) return;
-
   var hitRate = data.globalCacheHitRate != null ? data.globalCacheHitRate.toFixed(1) : '0.0';
   var ctxPct = data.lastContextPercent || 0;
 
@@ -78,23 +95,17 @@ function renderCards(data) {
     { cls: 'card-cache', icon: '🎯', label: '缓存命中率', value: hitRate + '%',                     sub: getCacheSub(data) },
   ];
 
-  // 如果有上下文窗口数据，替换或追加
   if (ctxPct > 0) {
     var ctxColor = ctxPct > 85 ? 'var(--red)' : ctxPct > 70 ? 'var(--yellow)' : 'var(--green)';
     cards.push({
-      cls: 'card-time',
-      icon: '📐',
-      label: '上下文窗口 (' + (data.lastModel || '') + ')',
+      cls: 'card-time', icon: '📐', label: '上下文窗口 (' + (data.lastModel || '') + ')',
       value: '<span style="color:' + ctxColor + '">' + ctxPct + '%</span>',
       sub: ctxPct > 85 ? '⚠️ 建议开启新会话' : ctxPct > 70 ? '⚡ 考虑压缩对话' : '✅ 窗口健康'
     });
   } else {
     cards.push({
-      cls: 'card-time',
-      icon: '⏱',
-      label: '会话时长',
-      value: fmtDuration(data.sessionDuration || 0),
-      sub: '自动监控中'
+      cls: 'card-time', icon: '⏱', label: '会话时长',
+      value: fmtDuration(data.sessionDuration || 0), sub: '自动监控中'
     });
   }
 
@@ -109,8 +120,7 @@ function renderCards(data) {
 }
 
 function getCacheSub(data) {
-  var total = 0;
-  var hit = 0;
+  var total = 0, hit = 0;
   if (data.byProvider) {
     for (var i = 0; i < data.byProvider.length; i++) {
       var p = data.byProvider[i];
@@ -123,24 +133,14 @@ function getCacheSub(data) {
       }
     }
   }
-  if (total > 0) {
-    return '命中 ' + fmtTokens(hit) + ' / ' + fmtTokens(total);
-  }
-  return '暂无缓存数据';
+  return total > 0 ? '命中 ' + fmtTokens(hit) + ' / ' + fmtTokens(total) : '暂无缓存数据';
 }
 
-// ============================================================
-// 图表（柱状图）
-// ============================================================
 function renderChart(data) {
   var ctx = document.getElementById('costChart');
   if (!ctx) return;
-
-  var labels = [];
-  var values = [];
-  var colors = [];
+  var labels = [], values = [], colors = [];
   var palette = ['#89b4fa', '#a6e3a1', '#f9e2af', '#f38ba8', '#cba6f7', '#94e2d5', '#fab387', '#89dceb'];
-
   var idx = 0;
   if (data.byProvider) {
     for (var i = 0; i < data.byProvider.length; i++) {
@@ -156,12 +156,7 @@ function renderChart(data) {
       }
     }
   }
-
-  if (gChart) {
-    gChart.destroy();
-    gChart = null;
-  }
-
+  if (gChart) { gChart.destroy(); gChart = null; }
   if (labels.length === 0) return;
 
   gChart = new Chart(ctx, {
@@ -177,37 +172,20 @@ function renderChart(data) {
       }],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 400 },
+      responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: '#1e1e2e',
-          titleColor: '#cdd6f4',
-          bodyColor: '#a6adc8',
-          borderColor: '#45475a',
-          borderWidth: 1,
-          cornerRadius: 6,
-          callbacks: {
-            label: function (ctx) {
-              return ' ¥' + ctx.raw.toFixed(4);
-            },
-          },
+          backgroundColor: '#1e1e2e', titleColor: '#cdd6f4', bodyColor: '#a6adc8',
+          borderColor: '#45475a', borderWidth: 1, cornerRadius: 6,
+          callbacks: { label: function (c) { return ' ¥' + c.raw.toFixed(4); } },
         },
       },
       scales: {
-        x: {
-          ticks: { color: '#a6adc8', font: { size: 10 } },
-          grid: { color: 'rgba(69,71,90,0.3)' },
-        },
+        x: { ticks: { color: '#a6adc8', font: { size: 10 } }, grid: { color: 'rgba(69,71,90,0.3)' } },
         y: {
           beginAtZero: true,
-          ticks: {
-            color: '#a6adc8',
-            font: { size: 10 },
-            callback: function (v) { return '¥' + v.toFixed(2); },
-          },
+          ticks: { color: '#a6adc8', font: { size: 10 }, callback: function (v) { return '¥' + v.toFixed(2); } },
           grid: { color: 'rgba(69,71,90,0.2)' },
         },
       },
@@ -215,20 +193,13 @@ function renderChart(data) {
   });
 }
 
-// ============================================================
-// 详细记录表格
-// ============================================================
 function renderTable(data) {
   var container = document.getElementById('model-table');
   if (!container) return;
-
   var rows = '';
-
   if (data.byProvider) {
     for (var i = 0; i < data.byProvider.length; i++) {
       var provider = data.byProvider[i];
-
-      // Provider 余额行
       if (provider.balance && provider.balance.balance > 0) {
         rows += '<tr><td colspan="6" style="background:var(--card); padding:9px 8px; font-weight:600;">'
           + '🔌 ' + escHtml(provider.name)
@@ -237,20 +208,16 @@ function renderTable(data) {
           + (provider.balance.giftBalance ? ' (赠送 ' + fmtCost(provider.balance.giftBalance) + ')' : '')
           + '</span></td></tr>';
       }
-
       if (provider.byModel) {
         for (var j = 0; j < provider.byModel.length; j++) {
           var m = provider.byModel[j];
-          var hitRate = '-';
-          var badgeCls = '';
-          var rate = 0;
+          var hitRate = '-', badgeCls = '', rate = 0;
           var total = (m.cacheHitTokens || 0) + (m.cacheMissTokens || 0);
           if (total > 0) {
             rate = ((m.cacheHitTokens || 0) / total) * 100;
             hitRate = rate.toFixed(0) + '%';
             badgeCls = rate >= 70 ? 'badge-good' : rate >= 40 ? 'badge-warn' : 'badge-poor';
           }
-
           rows += '<tr>'
             + '<td>' + escHtml(m.model) + '</td>'
             + '<td>' + (m.requests || 0) + '</td>'
@@ -263,13 +230,75 @@ function renderTable(data) {
       }
     }
   }
-
   container.innerHTML = '<table>'
-    + '<thead><tr>'
-    + '<th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>费用</th><th>缓存命中</th>'
-    + '</tr></thead>'
+    + '<thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>费用</th><th>缓存命中</th></tr></thead>'
     + '<tbody>' + (rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px;">暂无记录</td></tr>') + '</tbody>'
     + '</table>';
+}
+
+// ============================================================
+// 设置面板
+// ============================================================
+function applySettings(settings) {
+  setField('setting-apiKey', settings.apiKey || '');
+  setField('setting-apiBase', settings.apiBase || '');
+  setField('setting-balanceCheckInterval', settings.balanceCheckInterval);
+  setCheckbox('setting-interceptEnabled', settings.interceptEnabled);
+  setCheckbox('setting-autoStart', settings.autoStart);
+  setCheckbox('setting-showCacheHitRate', settings.showCacheHitRate);
+  setCheckbox('setting-showNotificationOnUpdate', settings.showNotificationOnUpdate);
+  setField('setting-statusBarDisplay', settings.statusBarDisplay);
+  setField('setting-contextWarnThreshold', settings.contextWarnThreshold);
+  setField('setting-contextCriticalThreshold', settings.contextCriticalThreshold);
+  setField('setting-costAlertThreshold', settings.costAlertThreshold);
+  setField('setting-theme', settings.theme);
+
+  // 显示 API Key 状态
+  var statusEl = document.getElementById('api-key-status');
+  if (statusEl) {
+    statusEl.textContent = settings.apiKeyMasked
+      ? '当前: ' + settings.apiKeyMasked
+      : '未设置 API Key（仍可追踪用量，但无法查余额）';
+  }
+}
+
+function setField(id, value) {
+  var el = document.getElementById(id);
+  if (el && value !== undefined && value !== null) {
+    el.value = value;
+  }
+}
+
+function setCheckbox(id, value) {
+  var el = document.getElementById(id);
+  if (el) { el.checked = !!value; }
+}
+
+/** 保存 API Key（特殊处理，需要隐藏值） */
+function saveApiKey() {
+  var input = document.getElementById('setting-apiKey');
+  if (!input) return;
+  var val = input.value.trim();
+  if (!val) {
+    showSaveStatus('apiKey', false);
+    return;
+  }
+  postMsg('saveSetting', { key: 'apiKey', value: val });
+}
+
+/** 保存单个设置 */
+function saveSetting(key, value) {
+  postMsg('saveSetting', { key: key, value: value });
+}
+
+function showSaveStatus(key, success) {
+  var el = document.getElementById('api-key-status');
+  if (key === 'apiKey' && el) {
+    el.textContent = success ? '✅ 已保存' : '❌ 保存失败';
+    if (success) {
+      setTimeout(function () { el.textContent = ''; }, 2000);
+    }
+  }
 }
 
 // ============================================================
@@ -281,14 +310,12 @@ function fmtCost(cost) {
   if (cost < 1) return '¥' + cost.toFixed(3);
   return '¥' + cost.toFixed(2);
 }
-
 function fmtTokens(n) {
   if (n == null) return '0';
   if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
   return String(n);
 }
-
 function fmtDuration(ms) {
   if (!ms) return '0m';
   var mins = Math.floor(ms / 60000);
@@ -296,7 +323,6 @@ function fmtDuration(ms) {
   if (hrs > 0) return hrs + 'h ' + (mins % 60) + 'm';
   return mins + 'm';
 }
-
 function escHtml(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

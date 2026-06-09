@@ -50,7 +50,6 @@ const KNOWN_TOOL_PATTERNS = [
     {
         name: 'Continue',
         pattern: '.continue',
-        /** Continue 在 ~/.continue/ 下存储 session 日志 */
         globs: ['**/session-*.json', '**/*.jsonl'],
     },
     {
@@ -62,6 +61,26 @@ const KNOWN_TOOL_PATTERNS = [
         name: 'Aider',
         pattern: '.aider',
         globs: ['**/*.json', '**/*.jsonl', '**/history.jsonl'],
+    },
+    {
+        name: 'Roo Code',
+        pattern: 'roo-code',
+        globs: ['**/*.json', '**/*.jsonl'],
+    },
+    {
+        name: 'Cody',
+        pattern: 'sourcegraph.cody-ai',
+        globs: ['**/*.json', '**/*.jsonl'],
+    },
+    {
+        name: 'Copilot Chat',
+        pattern: 'github.copilot-chat',
+        globs: ['**/*.json', '**/*.jsonl'],
+    },
+    {
+        name: 'CodeGPT',
+        pattern: 'codegpt',
+        globs: ['**/*.json', '**/*.jsonl'],
     },
 ];
 /**
@@ -314,17 +333,27 @@ class LocalProvider extends base_1.BaseProvider {
         const discovered = [];
         const home = process.env.HOME || process.env.USERPROFILE || '';
         const appData = process.env.APPDATA || '';
+        const localAppData = process.env.LOCALAPPDATA || '';
         for (const tool of KNOWN_TOOL_PATTERNS) {
-            // 搜索常见位置
             const candidates = [
+                // 标准位置
                 path.join(home, tool.pattern),
                 path.join(appData, tool.pattern),
-                path.join(home, '.vscode', tool.pattern),
+                path.join(localAppData, tool.pattern),
+                // VSCode globalStorage
+                path.join(appData, 'Code', 'User', 'globalStorage', tool.pattern),
+                path.join(home, '.vscode', 'globalStorage', tool.pattern),
+                path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', tool.pattern),
+                // 直接在 home 下
+                path.join(home, tool.pattern),
+                // 绝对路径兼容
+                tool.pattern,
             ];
             for (const c of candidates) {
                 try {
                     if (fs.existsSync(c)) {
                         discovered.push(c);
+                        console.log(`[DeepSeek Monitor] 发现 ${tool.name} 数据: ${c}`);
                         break;
                     }
                 }
@@ -332,6 +361,18 @@ class LocalProvider extends base_1.BaseProvider {
                     // skip
                 }
             }
+        }
+        // 额外：递归搜索 home 下的常见 AI 工具目录（深度限制）
+        const extraDirs = ['.continue', '.aider', '.cline'];
+        for (const dir of extraDirs) {
+            const p = path.join(home, dir);
+            try {
+                if (fs.existsSync(p) && !discovered.includes(p)) {
+                    discovered.push(p);
+                    console.log(`[DeepSeek Monitor] 发现额外数据: ${p}`);
+                }
+            }
+            catch { /* skip */ }
         }
         return discovered;
     }
