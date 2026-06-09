@@ -114,18 +114,28 @@ function activate(context) {
         const localProviders = registry_1.registry.getLocalProviders();
         if (localProviders.length > 0) {
             console.log(`[DeepSeek Monitor] 发现 ${localProviders.length} 个本地数据源，立即扫描...`);
-            localMonitor.forceScanAll(localProviders).then(() => {
-                const stats = tracker.getStats();
-                console.log(`[DeepSeek Monitor] 初始扫描完成: ${stats.totalRequests} 条记录`);
-                if (stats.totalRequests > 0) {
-                    vscode.window.showInformationMessage(`🛰️ DeepSeek Monitor: 已加载 ${stats.totalRequests} 条历史记录`);
-                }
-            }).catch((e) => {
+            localMonitor.forceScanAll(localProviders).catch((e) => {
                 console.error('[DeepSeek Monitor] 初始扫描失败:', e);
             });
         }
-        else {
-            console.log('[DeepSeek Monitor] 未发现本地 AI 工具缓存');
+        // 🔥 有 API Key 时立即拉取余额和近期用量
+        const apiProviders = registry_1.registry.getApiProviders();
+        const apiKey = (0, settings_1.getApiKey)();
+        if (apiKey && apiProviders.length > 0) {
+            console.log('[DeepSeek Monitor] 检测到 API Key，立即拉取余额和用量...');
+            apiMonitor.refreshAll(apiProviders).then(() => {
+                const stats = tracker.getStats();
+                console.log(`[DeepSeek Monitor] 初始拉取完成: ${stats.totalRequests} 条记录`);
+                // 检查余额
+                for (const [, ps] of stats.byProvider) {
+                    if (ps.balance) {
+                        console.log(`[DeepSeek Monitor] ${ps.provider} 余额: ${ps.balance.balance} ${ps.balance.currency}`);
+                    }
+                }
+            }).catch((e) => {
+                console.error('[DeepSeek Monitor] 初始 API 拉取失败:', e);
+                vscode.window.showWarningMessage('⚠️ DeepSeek Monitor: API 余额查询失败，请检查 API Key 和网络');
+            });
         }
     }
     catch (e) {

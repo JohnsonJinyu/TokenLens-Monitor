@@ -26,7 +26,7 @@ window.addEventListener('message', function (e) {
   switch (msg.type) {
     case 'update':
       gData = msg.data;
-      var hasData = gData && gData.totalRequests > 0;
+      var hasData = gData && (gData.totalRequests > 0 || hasBalanceData(gData));
       if (hasData !== gHasData) {
         gHasData = hasData;
         toggleView(hasData);
@@ -41,6 +41,17 @@ window.addEventListener('message', function (e) {
       break;
   }
 });
+
+/** 检查是否有余额数据 */
+function hasBalanceData(data) {
+  if (data && data.byProvider) {
+    for (var i = 0; i < data.byProvider.length; i++) {
+      var p = data.byProvider[i];
+      if (p.balance && p.balance.balance > 0) { return true; }
+    }
+  }
+  return false;
+}
 
 // 通知主进程 webview 已就绪
 postMsg('ready');
@@ -88,24 +99,53 @@ function renderCards(data) {
   if (!container) return;
   var hitRate = data.globalCacheHitRate != null ? data.globalCacheHitRate.toFixed(1) : '0.0';
   var ctxPct = data.lastContextPercent || 0;
+  var hasUsage = (data.totalRequests || 0) > 0;
 
-  var cards = [
-    { cls: 'card-cost',  icon: '💰', label: '总费用',   value: fmtCost(data.totalCost || 0),       sub: '' },
-    { cls: 'card-token', icon: '📝', label: '总 Tokens', value: fmtTokens(data.totalTokens || 0),   sub: (data.totalRequests || 0) + ' 次请求' },
-    { cls: 'card-cache', icon: '🎯', label: '缓存命中率', value: hitRate + '%',                     sub: getCacheSub(data) },
-  ];
+  var cards = [];
 
-  if (ctxPct > 0) {
-    var ctxColor = ctxPct > 85 ? 'var(--red)' : ctxPct > 70 ? 'var(--yellow)' : 'var(--green)';
-    cards.push({
-      cls: 'card-time', icon: '📐', label: '上下文窗口 (' + (data.lastModel || '') + ')',
-      value: '<span style="color:' + ctxColor + '">' + ctxPct + '%</span>',
-      sub: ctxPct > 85 ? '⚠️ 建议开启新会话' : ctxPct > 70 ? '⚡ 考虑压缩对话' : '✅ 窗口健康'
-    });
+  // 如果有余额，优先显示余额卡片
+  if (data.byProvider) {
+    for (var i = 0; i < data.byProvider.length; i++) {
+      var p = data.byProvider[i];
+      if (p.balance && p.balance.balance > 0) {
+        cards.push({
+          cls: 'card-cost', icon: '💳', label: p.name + ' 余额',
+          value: fmtCost(p.balance.balance),
+          sub: (p.balance.giftBalance ? '含赠送 ' + fmtCost(p.balance.giftBalance) : '') + ' · ' + (p.balance.currency || 'CNY')
+        });
+      }
+    }
+  }
+
+  if (hasUsage) {
+    cards.push({ cls: 'card-cost',  icon: '💰', label: '会话费用',   value: fmtCost(data.totalCost || 0), sub: '' });
+    cards.push({ cls: 'card-token', icon: '📝', label: '总 Tokens',   value: fmtTokens(data.totalTokens || 0), sub: (data.totalRequests || 0) + ' 次请求' });
+    cards.push({ cls: 'card-cache', icon: '🎯', label: '缓存命中率',  value: hitRate + '%', sub: getCacheSub(data) });
+
+    if (ctxPct > 0) {
+      var ctxColor = ctxPct > 85 ? 'var(--red)' : ctxPct > 70 ? 'var(--yellow)' : 'var(--green)';
+      cards.push({
+        cls: 'card-time', icon: '📐', label: '上下文窗口 (' + (data.lastModel || '') + ')',
+        value: '<span style="color:' + ctxColor + '">' + ctxPct + '%</span>',
+        sub: ctxPct > 85 ? '⚠️ 建议开启新会话' : ctxPct > 70 ? '⚡ 考虑压缩对话' : '✅ 窗口健康'
+      });
+    } else {
+      cards.push({
+        cls: 'card-time', icon: '⏱', label: '会话时长',
+        value: fmtDuration(data.sessionDuration || 0), sub: '自动监控中'
+      });
+    }
   } else {
+    // 无用量数据但有余额时，显示状态卡片
     cards.push({
-      cls: 'card-time', icon: '⏱', label: '会话时长',
-      value: fmtDuration(data.sessionDuration || 0), sub: '自动监控中'
+      cls: 'card-token', icon: '📝', label: '用量状态',
+      value: '等待请求',
+      sub: '使用 AI 工具后自动出现'
+    });
+    cards.push({
+      cls: 'card-cache', icon: '🔍', label: 'HTTP 拦截',
+      value: '运行中',
+      sub: '自动捕获 LLM API 调用'
     });
   }
 
