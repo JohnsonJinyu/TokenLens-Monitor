@@ -37,45 +37,72 @@ let dashboardProvider: DashboardPanel;
 export function activate(context: vscode.ExtensionContext) {
   console.log('[DeepSeek Monitor] 🚀 正在启动...');
 
-  // ---- Storage ----
-  storage = new StorageManager(context, getMaxLogEntries());
-
-  // ---- Tracker ----
-  tracker = new UsageTracker(storage);
-
-  // ---- Provider Registry ----
-  initProviders();
-
-  // ---- HTTP 拦截器（优先级最高：实时捕获所有 LLM API 请求）----
-  if (getInterceptEnabled()) {
-    interceptor.startInterception({
-      onUsage: (entry) => {
-        tracker.recordUsage([entry]);
-      },
-    });
+  // ---- 🔥 状态栏最先创建（确保无论如何都显示）----
+  try {
+    storage = new StorageManager(context, getMaxLogEntries());
+    tracker = new UsageTracker(storage);
+    statusBar = new StatusBarManager(tracker);
+    console.log('[DeepSeek Monitor] ✅ StatusBar 已创建');
+  } catch (e) {
+    console.error('[DeepSeek Monitor] ❌ StatusBar 创建失败:', e);
+    // 兜底：创建一个极简状态栏
+    try {
+      const fallback = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
+      fallback.text = '$(pulse) ¥0';
+      fallback.tooltip = 'DeepSeek Monitor';
+      fallback.command = 'deepseekMonitor.showDashboard';
+      fallback.show();
+      statusBar = fallback as any;
+    } catch { /* 彻底放弃 */ }
   }
 
-  // ---- Monitors (API 轮询 + 本地扫描作为补充) ----
-  apiMonitor = new ApiMonitor(tracker);
-  localMonitor = new LocalMonitor(tracker);
-
-  // ---- 立即扫描本地历史数据（不等定时器）----
-  const localProviders = registry.getLocalProviders();
-  if (localProviders.length > 0) {
-    console.log(`[DeepSeek Monitor] 发现 ${localProviders.length} 个本地数据源，立即扫描...`);
-    localMonitor.forceScanAll(localProviders).then(() => {
-      const stats = tracker.getStats();
-      console.log(`[DeepSeek Monitor] 初始扫描完成: ${stats.totalRequests} 条历史记录`);
-      if (stats.totalRequests > 0) {
-        vscode.window.showInformationMessage(
-          `🛰️ DeepSeek Monitor: 已加载 ${stats.totalRequests} 条历史记录`
-        );
-      }
-    });
+  // ---- Provider Registry（包裹 try/catch）----
+  try {
+    initProviders();
+  } catch (e) {
+    console.error('[DeepSeek Monitor] ❌ Provider 初始化失败:', e);
   }
 
-  // ---- StatusBar ----
-  statusBar = new StatusBarManager(tracker);
+  // ---- HTTP 拦截器 ----
+  try {
+    if (getInterceptEnabled()) {
+      interceptor.startInterception({
+        onUsage: (entry) => {
+          tracker.recordUsage([entry]);
+        },
+      });
+      console.log('[DeepSeek Monitor] ✅ HTTP 拦截器已启动');
+    }
+  } catch (e) {
+    console.error('[DeepSeek Monitor] ❌ 拦截器启动失败:', e);
+  }
+
+  // ---- Monitors ----
+  try {
+    apiMonitor = new ApiMonitor(tracker);
+    localMonitor = new LocalMonitor(tracker);
+
+    // 立即扫描本地历史
+    const localProviders = registry.getLocalProviders();
+    if (localProviders.length > 0) {
+      console.log(`[DeepSeek Monitor] 发现 ${localProviders.length} 个本地数据源，立即扫描...`);
+      localMonitor.forceScanAll(localProviders).then(() => {
+        const stats = tracker.getStats();
+        console.log(`[DeepSeek Monitor] 初始扫描完成: ${stats.totalRequests} 条记录`);
+        if (stats.totalRequests > 0) {
+          vscode.window.showInformationMessage(
+            `🛰️ DeepSeek Monitor: 已加载 ${stats.totalRequests} 条历史记录`
+          );
+        }
+      }).catch((e) => {
+        console.error('[DeepSeek Monitor] 初始扫描失败:', e);
+      });
+    } else {
+      console.log('[DeepSeek Monitor] 未发现本地 AI 工具缓存');
+    }
+  } catch (e) {
+    console.error('[DeepSeek Monitor] ❌ 监控器初始化失败:', e);
+  }
 
   // ---- Dashboard Webview ----
   dashboardProvider = new DashboardPanel(tracker, context.extensionUri);
