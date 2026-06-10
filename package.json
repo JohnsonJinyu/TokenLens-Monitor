@@ -3,7 +3,7 @@
   "displayName": "TokenLens — Agent & LLM Usage Monitor",
   "description": "监控 Claude Code、Codex、Copilot 等 AI 编程工具与 DeepSeek/OpenAI/Anthropic 等 LLM API 的 Token、费用、账户权益和缓存命中。状态栏 + 可视化面板。",
   "version": "0.1.0",
-  "publisher": "tokenlens",
+  "publisher": "pengcheng",
   "engines": {
     "vscode": "^1.82.0"
   },
