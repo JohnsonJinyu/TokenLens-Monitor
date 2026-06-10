@@ -8,8 +8,30 @@
     "vscode": "^1.82.0"
   },
   "categories": [
-    "Other"
+    "Programming Languages",
+    "Data Science",
+    "AI"
   ],
+  "keywords": [
+    "AI",
+    "LLM",
+    "DeepSeek",
+    "OpenAI",
+    "Token",
+    "Monitor",
+    "Usage",
+    "Cost"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/TokenLens-Monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/TokenLens-Monitor/issues"
+  },
+  "homepage": "https://github.com/your-username/TokenLens-Monitor#readme",
+  "icon": "media/icon.png",
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -67,7 +89,10 @@
                 "cacheMetrics": true,
                 "pricing": true
               },
-              "models": ["deepseek-chat", "deepseek-reasoner"]
+              "models": [
+                "deepseek-chat",
+                "deepseek-reasoner"
+              ]
             }
           ],
           "description": "要监控的 LLM 提供商列表。支持 provider-level API Key、账户权益类型和 OpenAI/Anthropic 兼容能力声明。"
@@ -104,8 +129,17 @@
         "tokenLens.pricing": {
           "type": "object",
           "default": {
-            "deepseek-chat": { "input": 1.0, "output": 2.0, "currency": "CNY", "cacheHitDiscount": 0.1 },
-            "deepseek-reasoner": { "input": 4.0, "output": 16.0, "currency": "CNY" }
+            "deepseek-chat": {
+              "input": 1,
+              "output": 2,
+              "currency": "CNY",
+              "cacheHitDiscount": 0.1
+            },
+            "deepseek-reasoner": {
+              "input": 4,
+              "output": 16,
+              "currency": "CNY"
+            }
           },
           "description": "自定义模型定价（每百万 tokens）。格式: {\"模型名\": {\"input\": 输入价格, \"output\": 输出价格, \"currency\": \"CNY\", \"cacheHitDiscount\": 缓存折扣比例}}"
         },
@@ -165,7 +199,11 @@
         "tokenLens.theme": {
           "type": "string",
           "default": "auto",
-          "enum": ["auto", "dark", "light"],
+          "enum": [
+            "auto",
+            "dark",
+            "light"
+          ],
           "description": "仪表板面板主题。auto 跟随 VSCode 主题。"
         }
       }
@@ -197,8 +235,9 @@
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {
-    "@types/vscode": "^1.82.0",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.82.0",
+    "canvas": "^3.2.3",
     "typescript": "^5.3.0"
   }
 }
