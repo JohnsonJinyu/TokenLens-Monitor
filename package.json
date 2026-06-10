@@ -25,12 +25,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/TokenLens-Monitor.git"
+    "url": "https://github.com/JohnsonJinyu/TokenLens-Monitor.git"
   },
   "bugs": {
-    "url": "https://github.com/your-username/TokenLens-Monitor/issues"
+    "url": "https://github.com/JohnsonJinyu/TokenLens-Monitor/issues"
   },
-  "homepage": "https://github.com/your-username/TokenLens-Monitor#readme",
+  "homepage": "https://github.com/JohnsonJinyu/TokenLens-Monitor#readme",
   "icon": "media/icon.png",
   "activationEvents": [
     "onStartupFinished"

@@ -18,10 +18,10 @@ TokenLens 是一个功能强大的 VS Code 插件，专为 AI 开发者设计。
 ## 运行截图
 
 ### 状态栏实时监控
-![状态栏](https://github.com/your-username/TokenLens-Monitor/raw/main/media/screenshots/statusBar.png)
+![状态栏](https://github.com/JohnsonJinyu/TokenLens-Monitor/raw/main/media/screenshots/statusBar.png)
 
 ### 用量面板 - 总览
-![用量面板](https://github.com/your-username/TokenLens-Monitor/raw/main/media/screenshots/dashboard.png)
+![用量面板](https://github.com/JohnsonJinyu/TokenLens-Monitor/raw/main/media/screenshots/dashboard.png)
 
 ## 🚀 快速开始
 
