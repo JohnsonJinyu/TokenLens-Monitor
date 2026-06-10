@@ -101,7 +101,7 @@ class DashboardPanel {
         const config = vscode.workspace.getConfiguration(SECTION);
         const keys = [
             'apiKey', 'apiBase', 'balanceCheckInterval', 'interceptEnabled',
-            'autoStart', 'showCacheHitRate', 'statusBarDisplay',
+            'autoStart', 'showCacheHitRate',
             'contextWarnThreshold', 'contextCriticalThreshold',
             'costAlertThreshold', 'showNotificationOnUpdate', 'theme',
         ];
@@ -118,6 +118,7 @@ class DashboardPanel {
         else {
             settings.apiKeyMasked = '';
         }
+        settings.providers = this.buildProviderSettings(settings);
         this._view.webview.postMessage({ type: 'settings', data: settings });
     }
     postSnapshot(stats) {
@@ -135,18 +136,49 @@ class DashboardPanel {
             totalTokens: entry.promptTokens + entry.completionTokens,
             source: entry.endpoint || 'captured',
         }));
-        const providerRows = Array.from(stats.byProvider.entries()).map(([name, ps]) => ({
-            name,
-            requests: ps.totalRequests,
-            promptTokens: ps.totalPromptTokens,
-            completionTokens: ps.totalCompletionTokens,
-            totalTokens: ps.totalPromptTokens + ps.totalCompletionTokens,
-            cost: ps.totalCost,
-            cacheHitRate: ps.cacheHitRate,
-            cacheHitTokens: Array.from(ps.byModel.values()).reduce((sum, m) => sum + m.cacheHitTokens, 0),
-            cacheMissTokens: Array.from(ps.byModel.values()).reduce((sum, m) => sum + m.cacheMissTokens, 0),
-            balance: ps.balance,
-        })).sort((a, b) => b.cost - a.cost || b.totalTokens - a.totalTokens);
+        const providerConfigMap = this.getProviderConfigMap();
+        const providerRows = Array.from(stats.byProvider.entries()).map(([name, ps]) => {
+            const providerConfig = providerConfigMap.get(name);
+            return {
+                name,
+                displayName: providerConfig?.displayName || name,
+                entitlementKind: providerConfig?.entitlementKind,
+                capabilitySummary: this.formatCapabilities(providerConfig),
+                capabilityTags: this.getCapabilityTags(providerConfig),
+                capabilityState: this.getProviderCapabilityState(providerConfig),
+                requests: ps.totalRequests,
+                promptTokens: ps.totalPromptTokens,
+                completionTokens: ps.totalCompletionTokens,
+                totalTokens: ps.totalPromptTokens + ps.totalCompletionTokens,
+                cost: ps.totalCost,
+                cacheHitRate: ps.cacheHitRate,
+                cacheHitTokens: Array.from(ps.byModel.values()).reduce((sum, m) => sum + m.cacheHitTokens, 0),
+                cacheMissTokens: Array.from(ps.byModel.values()).reduce((sum, m) => sum + m.cacheMissTokens, 0),
+                balance: ps.balance,
+            };
+        }).sort((a, b) => b.cost - a.cost || b.totalTokens - a.totalTokens);
+        for (const providerConfig of (0, settings_1.getProviders)()) {
+            if (providerRows.some((row) => row.name === providerConfig.name)) {
+                continue;
+            }
+            providerRows.push({
+                name: providerConfig.name,
+                displayName: providerConfig.displayName || providerConfig.name,
+                entitlementKind: providerConfig.entitlementKind,
+                capabilitySummary: this.formatCapabilities(providerConfig),
+                capabilityTags: this.getCapabilityTags(providerConfig),
+                capabilityState: this.getProviderCapabilityState(providerConfig),
+                requests: 0,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                cost: 0,
+                cacheHitRate: 0,
+                cacheHitTokens: 0,
+                cacheMissTokens: 0,
+                balance: undefined,
+            });
+        }
         const modelRows = Array.from(stats.byProvider.entries()).flatMap(([provider, ps]) => Array.from(ps.byModel.entries()).map(([model, m]) => {
             const cacheTotal = m.cacheHitTokens + m.cacheMissTokens;
             return {
@@ -187,7 +219,7 @@ class DashboardPanel {
             balanceSummary,
             cacheSummary,
             statusBarSummary: {
-                balanceText: balanceSummary.primary ? this.formatMoney(balanceSummary.primary.balance, balanceSummary.primary.currency) : '未查询',
+                balanceText: balanceSummary.primary ? this.formatEntitlement(balanceSummary.primary) : '未查询',
                 costText: this.formatMoney(stats.totalCost),
                 tokenText: this.formatTokens(stats.totalTokens),
                 contextText: stats.lastContextPercent ? `${stats.lastContextPercent}%` : '未捕获',
@@ -323,6 +355,103 @@ class DashboardPanel {
             estimatedSavings: hasSavingsEstimate ? estimatedSavings : null,
         };
     }
+    buildProviderSettings(settings) {
+        const providers = (0, settings_1.getProviders)();
+        const fallbackProviders = providers.length ? providers : [{
+                id: 'deepseek',
+                name: 'DeepSeek',
+                displayName: 'DeepSeek',
+                type: 'api',
+                apiBase: settings.apiBase || 'https://api.deepseek.com',
+                entitlementKind: 'balance',
+                capabilities: {
+                    entitlement: true,
+                    usageApi: false,
+                    interceptParser: 'openai',
+                    cacheMetrics: true,
+                    pricing: true,
+                },
+                models: ['deepseek-chat', 'deepseek-reasoner'],
+            }];
+        return fallbackProviders.map((provider) => {
+            const apiKey = provider.apiKey || (provider.name === 'DeepSeek' ? settings.apiKey : '');
+            const apiBase = provider.name === 'DeepSeek'
+                ? (settings.apiBase || provider.apiBase || '')
+                : (provider.apiBase || '');
+            return {
+                id: provider.id || provider.name,
+                name: provider.name,
+                displayName: provider.displayName || provider.name,
+                type: provider.type,
+                apiBase,
+                apiKey,
+                apiKeyMasked: this.maskSecret(apiKey),
+                models: provider.models || [],
+                entitlementKind: provider.entitlementKind || 'unknown',
+                capabilities: provider.capabilities || {},
+                capabilitySummary: this.formatCapabilities(provider),
+                capabilityState: this.getProviderCapabilityState(provider),
+                usesGlobalFallback: !provider.apiKey && provider.name === 'DeepSeek' && !!settings.apiKey,
+            };
+        });
+    }
+    getProviderConfigMap() {
+        const map = new Map();
+        for (const provider of (0, settings_1.getProviders)()) {
+            map.set(provider.name, provider);
+        }
+        return map;
+    }
+    formatCapabilities(provider) {
+        const c = provider?.capabilities;
+        if (!c) {
+            return '能力待声明';
+        }
+        const items = [
+            c.entitlement ? '权益' : '',
+            c.usageApi ? '用量API' : '',
+            c.interceptParser && c.interceptParser !== 'none' ? `${c.interceptParser}拦截` : '',
+            c.cacheMetrics ? '缓存' : '',
+            c.pricing ? '定价' : '',
+        ].filter(Boolean);
+        return items.length ? items.join(' / ') : '仅基础配置';
+    }
+    getCapabilityTags(provider) {
+        const c = provider?.capabilities;
+        return [
+            { label: '权益', enabled: !!c?.entitlement },
+            { label: '拦截', enabled: !!c?.interceptParser && c.interceptParser !== 'none' },
+            { label: '缓存', enabled: !!c?.cacheMetrics },
+            { label: '定价', enabled: !!c?.pricing },
+        ];
+    }
+    getProviderCapabilityState(provider) {
+        if (!provider) {
+            return '能力待声明';
+        }
+        const c = provider.capabilities;
+        if (provider.name === 'DeepSeek') {
+            return '已支持权益查询 / 支持拦截用量 / 支持缓存指标';
+        }
+        if (provider.name === 'Kimi' || provider.id === 'kimi') {
+            return c?.entitlement
+                ? '已支持权益查询 / 支持 OpenAI-compatible 拦截解析'
+                : '待接入权益查询 / 支持 OpenAI-compatible 拦截解析';
+        }
+        if (c?.entitlement) {
+            return '已支持权益查询';
+        }
+        return '模板配置 / 待验证官方权益接口';
+    }
+    maskSecret(value) {
+        if (typeof value !== 'string' || !value) {
+            return '';
+        }
+        if (value.length > 8) {
+            return `${value.slice(0, 4)}...${value.slice(-4)}`;
+        }
+        return 'configured';
+    }
     formatMoney(value, currency = 'CNY') {
         const symbol = currency === 'USD' ? '$' : '¥';
         if (value === 0) {
@@ -335,6 +464,18 @@ class DashboardPanel {
             return `${symbol}${value.toFixed(3)}`;
         }
         return `${symbol}${value.toFixed(2)}`;
+    }
+    formatEntitlement(info) {
+        if (info.displayValue) {
+            return info.displayValue;
+        }
+        if (typeof info.primaryValue === 'number' && info.currency) {
+            return this.formatMoney(info.primaryValue, info.currency);
+        }
+        if (info.primaryValue !== undefined && info.primaryValue !== null) {
+            return `${info.primaryValue}${info.primaryUnit ? ` ${info.primaryUnit}` : ''}`;
+        }
+        return this.formatMoney(info.balance, info.currency);
     }
     formatTokens(value) {
         if (value >= 1000000) {
@@ -618,13 +759,61 @@ class DashboardPanel {
       min-width: 0;
     }
     .form-inline { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+    .provider-add { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-top: 10px; }
     .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; }
     .toggle-row input { width: 16px; height: 16px; }
     .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    .provider-settings { display: grid; gap: 10px; }
+    .provider-card {
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 10px;
+      background: var(--surface);
+    }
+    .provider-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .provider-name { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .provider-kind { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .provider-state {
+      color: var(--fg);
+      font-size: 11px;
+      margin: 0 0 10px;
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--panel);
+    }
+    .cap-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 8px 0 0; }
+    .cap-item { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cap-item.on { color: var(--fg); }
+    .cap-tags { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+    .cap-tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 18px;
+      padding: 0 6px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 10px;
+      color: var(--fg);
+      background: var(--surface);
+    }
+    .cap-tag.muted { color: var(--muted); opacity: 0.75; }
+    .provider-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .provider-actions .btn { flex: 1; }
+    .btn.disabled, .btn:disabled { opacity: 0.55; cursor: not-allowed; }
     @media (max-width: 320px) {
       body { padding: 10px; }
       .toolbar { grid-template-columns: 1fr; }
       .kpis { grid-template-columns: 1fr; }
+      .provider-add { grid-template-columns: 1fr; }
+      .provider-add .btn { width: 100%; }
+      .cap-list { grid-template-columns: 1fr; }
       .value { font-size: 17px; }
       .panel-head { align-items: flex-start; flex-direction: column; }
       .panel-head-actions { width: 100%; justify-content: space-between; }
@@ -648,7 +837,7 @@ class DashboardPanel {
 
     <section id="panel-monitor" class="shell">
       <div class="toolbar">
-        <button class="btn primary" onclick="postMsg('refresh')">刷新余额</button>
+        <button class="btn primary" onclick="postMsg('refresh')">刷新权益</button>
         <button class="btn" onclick="postMsg('reset')">重置会话</button>
         <button class="btn" onclick="postMsg('export')">导出报告</button>
       </div>
@@ -676,7 +865,7 @@ class DashboardPanel {
           </div>
         </div>
         <div class="chart-wrap" id="trend-wrap"><canvas id="trendChart"></canvas></div>
-        <div class="empty hidden" id="trend-empty">暂无请求数据。使用 AI 编程工具后，这里会显示费用、Token 和请求趋势。</div>
+        <div class="empty hidden" id="trend-empty">暂无 usage 数据。产生一次 AI 请求，或通过拦截/日志导入到 usage 后，这里会显示费用、Token 和请求趋势。</div>
       </section>
 
       <section class="panel" id="heatmap-section">
@@ -723,21 +912,19 @@ class DashboardPanel {
 
     <section id="panel-settings" class="hidden settings-panel">
       <div class="settings-group">
-        <h2>API 配置</h2>
-        <div class="form-row">
-          <label class="form-label">DeepSeek API Key（余额查询）</label>
-          <div class="form-inline">
-            <input class="form-input" type="password" id="setting-apiKey" placeholder="sk-...">
-            <button class="btn" onclick="saveApiKey()">保存</button>
-          </div>
-          <div class="hint" id="api-key-status"></div>
+        <h2>服务商配置</h2>
+        <div class="provider-settings" id="provider-settings"></div>
+        <div class="provider-add">
+          <select class="form-select" id="provider-preset-select"></select>
+          <button class="btn" onclick="addProviderFromPreset()">添加服务商</button>
         </div>
+        <div class="hint" id="provider-save-status">DeepSeek 会兼容旧全局 Key；其他厂商先作为模板配置，未确认权益 API 前不会自动查询余额。</div>
+      </div>
+
+      <div class="settings-group">
+        <h2>刷新和监控</h2>
         <div class="form-row">
-          <label class="form-label">API Base URL</label>
-          <input class="form-input" id="setting-apiBase" placeholder="https://api.deepseek.com" onchange="saveSetting('apiBase', this.value)">
-        </div>
-        <div class="form-row">
-          <label class="form-label">余额查询间隔（分钟）</label>
+          <label class="form-label">权益刷新间隔（分钟）</label>
           <input class="form-input" type="number" id="setting-balanceCheckInterval" min="1" max="60" onchange="saveSetting('balanceCheckInterval', parseInt(this.value, 10))">
         </div>
       </div>
@@ -748,15 +935,6 @@ class DashboardPanel {
         <label class="toggle-row"><span>VS Code 启动时自动监控</span><input type="checkbox" id="setting-autoStart" onchange="saveSetting('autoStart', this.checked)"></label>
         <label class="toggle-row"><span>显示缓存命中率</span><input type="checkbox" id="setting-showCacheHitRate" onchange="saveSetting('showCacheHitRate', this.checked)"></label>
         <label class="toggle-row"><span>用量更新通知</span><input type="checkbox" id="setting-showNotificationOnUpdate" onchange="saveSetting('showNotificationOnUpdate', this.checked)"></label>
-        <div class="form-row">
-          <label class="form-label">状态栏显示内容</label>
-          <select class="form-select" id="setting-statusBarDisplay" onchange="saveSetting('statusBarDisplay', this.value)">
-            <option value="cost-only">仅费用</option>
-            <option value="cost-tokens">费用 + Token</option>
-            <option value="cost-tokens-cache">费用 + Token + 缓存命中</option>
-            <option value="cost-tokens-cache-context">全部（含上下文占比）</option>
-          </select>
-        </div>
       </div>
 
       <div class="settings-group">

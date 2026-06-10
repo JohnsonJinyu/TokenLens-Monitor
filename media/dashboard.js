@@ -8,6 +8,69 @@ var gTrendRange = '24h';
 var trendChart = null;
 var modelCostChart = null;
 
+var PROVIDER_PRESETS = [
+  {
+    id: 'kimi',
+    name: 'Kimi',
+    displayName: 'Kimi / Moonshot',
+    type: 'api',
+    apiBase: 'https://api.moonshot.cn',
+    entitlementKind: 'balance',
+    capabilities: { entitlement: true, usageApi: false, interceptParser: 'openai', cacheMetrics: false, pricing: false },
+    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k']
+  },
+  {
+    id: 'glm',
+    name: 'GLM',
+    displayName: '智谱 GLM',
+    type: 'api',
+    apiBase: 'https://open.bigmodel.cn/api/paas/v4',
+    entitlementKind: 'quota',
+    capabilities: { entitlement: false, usageApi: false, interceptParser: 'openai', cacheMetrics: false, pricing: false },
+    models: ['glm-4.5', 'glm-4.5-air']
+  },
+  {
+    id: 'qoder',
+    name: 'Qoder',
+    displayName: 'Qoder',
+    type: 'api',
+    apiBase: '',
+    entitlementKind: 'credits',
+    capabilities: { entitlement: false, usageApi: false, interceptParser: 'none', cacheMetrics: false, pricing: false },
+    models: []
+  },
+  {
+    id: 'bailian',
+    name: 'Bailian',
+    displayName: '阿里百炼 / 通义千问',
+    type: 'api',
+    apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    entitlementKind: 'billing',
+    capabilities: { entitlement: false, usageApi: false, interceptParser: 'openai', cacheMetrics: false, pricing: false },
+    models: ['qwen-plus', 'qwen-max']
+  },
+  {
+    id: 'siliconflow',
+    name: 'SiliconFlow',
+    displayName: '硅基流动',
+    type: 'api',
+    apiBase: 'https://api.siliconflow.cn/v1',
+    entitlementKind: 'usageOnly',
+    capabilities: { entitlement: false, usageApi: false, interceptParser: 'openai', cacheMetrics: true, pricing: false },
+    models: []
+  },
+  {
+    id: 'volcark',
+    name: 'VolcArk',
+    displayName: '火山方舟',
+    type: 'api',
+    apiBase: 'https://ark.cn-beijing.volces.com/api/v3',
+    entitlementKind: 'quota',
+    capabilities: { entitlement: false, usageApi: false, interceptParser: 'openai', cacheMetrics: false, pricing: false },
+    models: []
+  }
+];
+
 function postMsg(type, payload) {
   if (vscode) {
     vscode.postMessage(Object.assign({ type: type }, payload || {}));
@@ -73,22 +136,15 @@ function renderKpis(snapshot) {
   var balance = snapshot.balanceSummary && snapshot.balanceSummary.primary;
   var cache = snapshot.cacheSummary || {};
   var ctx = stats.lastContextPercent || 0;
-  var balanceLines = [];
-  if (balance) {
-    balanceLines.push(['已用', fmtMoney(balance.totalUsed, balance.currency)]);
-    balanceLines.push(['充值', fmtMoney(balance.totalCharged, balance.currency)]);
-    if (balance.giftBalance && balance.giftBalance > 0) {
-      balanceLines.push(['赠送', fmtMoney(balance.giftBalance, balance.currency)]);
-    }
-  }
+  var entitlementLines = getEntitlementLines(balance);
 
   var kpis = [
     {
       icon: '💳',
-      label: '账户余额',
-      value: balance ? fmtMoney(balance.balance, balance.currency) : '未查询',
-      sub: balance ? '更新时间 ' + fmtTime(balance.fetchedAt) : '配置 API Key 后显示余额',
-      lines: balanceLines
+      label: balance && balance.label ? balance.label : '账户权益',
+      value: balance ? formatEntitlement(balance) : '未查询',
+      sub: balance ? '更新时间 ' + fmtTime(balance.fetchedAt) : '请配置支持权益查询的服务商',
+      lines: balance ? entitlementLines : [['下一步', 'DeepSeek 或 Kimi 填入 API Key 后刷新权益']]
     },
     {
       icon: '💰',
@@ -169,14 +225,17 @@ function renderHealth(snapshot) {
         : '等待 VS Code 扩展发出 LLM API 请求'
     },
     {
-      name: 'API 查询',
+      name: '权益查询',
       state: api.configured ? (api.lastError ? '异常' : '可用') : '未配置',
       cls: api.configured ? (api.lastError ? 'bad' : 'good') : 'warn',
       detail: api.configured
         ? (formatApiDetail(api) || formatApiOkDetail(api))
-        : '配置 API Key 后可查询余额和平台用量'
+        : '配置服务商 API Key 后可查询权益和平台用量'
     }
   ];
+  (api.providers || []).forEach(function (p) {
+    rows.push(getProviderHealthRow(p));
+  });
 
   if (local.configured || local.lastError || local.lastEntryCount) {
     rows.push({
@@ -208,19 +267,52 @@ function formatApiDetail(api) {
   if (!api || !api.lastError) return '';
   var text = String(api.lastError).replace(/\s+/g, ' ').trim();
   if (text.indexOf('404') >= 0) {
-    return '平台用量接口不可用；余额仍可查询，用量依赖请求拦截';
+    return '平台用量接口不可用；权益仍可查询，用量依赖请求拦截';
   }
   return text.length > 96 ? text.slice(0, 93) + '...' : text;
 }
 
 function formatApiOkDetail(api) {
   if (api.lastEntryCount > 0) {
-    return '余额 ' + fmtTime(api.lastBalanceAt) + '，用量新增 ' + api.lastEntryCount + ' 条';
+    return '权益 ' + fmtTime(api.lastBalanceAt) + '，用量新增 ' + api.lastEntryCount + ' 条';
   }
   if (api.lastBalanceAt) {
-    return '余额 ' + fmtTime(api.lastBalanceAt) + '，用量等待请求拦截';
+    return '权益 ' + fmtTime(api.lastBalanceAt) + '，用量等待请求拦截';
   }
-  return '等待余额接口返回';
+  return '等待权益接口返回';
+}
+
+function getProviderHealthRow(provider) {
+  if (!provider.entitlementEnabled) {
+    return {
+      name: provider.displayName || provider.provider,
+      state: '待适配',
+      detail: provider.capabilitySkippedReason || '模板配置，未启用权益查询',
+      ok: true
+    };
+  }
+  if (!provider.hasApiKey) {
+    return {
+      name: (provider.displayName || provider.provider) + ' 权益查询',
+      state: '未配置',
+      detail: '请在服务商配置中保存 provider-level API Key',
+      ok: false
+    };
+  }
+  if (provider.lastError) {
+    return {
+      name: (provider.displayName || provider.provider) + ' 权益查询',
+      state: '异常',
+      detail: provider.lastError,
+      ok: false
+    };
+  }
+  return {
+    name: (provider.displayName || provider.provider) + ' 权益查询',
+    state: provider.lastEntitlementAt ? '可用' : '等待',
+    detail: provider.lastEntitlementAt ? '上次更新 ' + fmtTime(provider.lastEntitlementAt) : '等待接口返回',
+    ok: true
+  };
 }
 
 function renderTrend(snapshot) {
@@ -231,7 +323,7 @@ function renderTrend(snapshot) {
   setClass('range-5h', gTrendRange === '5h' ? 'active' : '');
   setClass('range-24h', gTrendRange === '24h' ? 'active' : '');
   setClass('range-7d', gTrendRange === '7d' ? 'active' : '');
-  setText('trend-meta', hasData ? getRangeSummary(rows) : '暂无数据');
+  setText('trend-meta', hasData ? getRangeSummary(rows) : '等待 usage');
   destroyChart('trend');
   if (!hasData || typeof Chart === 'undefined') return;
 
@@ -358,23 +450,25 @@ function renderProviderTable(snapshot) {
   }
   if (rows.length === 1 && !hasUsage) {
     var only = rows[0];
-    var onlyBalance = only.balance ? fmtMoney(only.balance.balance, only.balance.currency) : '未查询';
+    var onlyEntitlement = only.balance ? formatEntitlement(only.balance) : '未查询';
     el.innerHTML = '<div class="compact-row">'
-      + '<div class="compact-title">' + escHtml(only.name) + '</div>'
-      + '<div class="compact-meta">余额 ' + escHtml(onlyBalance) + '</div>'
+      + '<div class="compact-title">' + escHtml(only.displayName || only.name) + '</div>'
+      + '<div class="compact-meta">权益 ' + escHtml(onlyEntitlement) + '</div>'
+      + '<div class="cap-tags">' + renderCapabilityTags(only.capabilityTags) + '</div>'
       + '<div class="compact-meta">暂无用量</div>'
       + '</div>';
     return;
   }
   el.innerHTML = '<table><thead><tr>'
-    + '<th style="width:28%">服务商</th><th>余额</th><th>请求</th><th>Token</th><th>缓存</th>'
+    + '<th style="width:24%">服务商</th><th>权益</th><th>能力</th><th>请求</th><th>Token</th><th>缓存</th>'
     + '</tr></thead><tbody>'
     + rows.map(function (r) {
-      var balance = r.balance ? fmtMoney(r.balance.balance, r.balance.currency) : '未查询';
+      var balance = r.balance ? formatEntitlement(r.balance) : '未查询';
       var cache = (r.cacheHitTokens || r.cacheMissTokens) ? fmtPercent(r.cacheHitRate || 0) : '无明细';
       return '<tr>'
-        + '<td title="' + escAttr(r.name) + '">' + escHtml(r.name) + '</td>'
+        + '<td title="' + escAttr(r.name) + '">' + escHtml(r.displayName || r.name) + '</td>'
         + '<td>' + escHtml(balance) + '</td>'
+        + '<td title="' + escAttr(r.capabilityState || r.capabilitySummary || '') + '">' + renderCapabilityTags(r.capabilityTags) + '</td>'
         + '<td>' + (r.requests || 0) + '</td>'
         + '<td>' + fmtTokens(r.totalTokens || 0) + '</td>'
         + '<td>' + escHtml(cache) + '</td>'
@@ -445,19 +539,125 @@ function renderHistoryTable(snapshot) {
 
 function applySettings(settings) {
   if (!settings) return;
-  setField('setting-apiKey', settings.apiKey || '');
-  setField('setting-apiBase', settings.apiBase || '');
+  renderProviderSettings(settings);
+  renderProviderPresetSelect(settings);
   setField('setting-balanceCheckInterval', settings.balanceCheckInterval);
   setCheckbox('setting-interceptEnabled', settings.interceptEnabled);
   setCheckbox('setting-autoStart', settings.autoStart);
   setCheckbox('setting-showCacheHitRate', settings.showCacheHitRate);
   setCheckbox('setting-showNotificationOnUpdate', settings.showNotificationOnUpdate);
-  setField('setting-statusBarDisplay', settings.statusBarDisplay);
   setField('setting-contextWarnThreshold', settings.contextWarnThreshold);
   setField('setting-contextCriticalThreshold', settings.contextCriticalThreshold);
   setField('setting-costAlertThreshold', settings.costAlertThreshold);
   setField('setting-theme', settings.theme);
-  setText('api-key-status', settings.apiKeyMasked ? '当前已配置：' + settings.apiKeyMasked : '未配置 API Key');
+}
+
+function renderProviderSettings(settings) {
+  var el = document.getElementById('provider-settings');
+  if (!el) return;
+  var providers = Array.isArray(settings.providers) ? settings.providers : [];
+  if (!providers.length) {
+    el.innerHTML = '<div class="empty">暂无服务商配置。</div>';
+    return;
+  }
+
+  el.innerHTML = providers.map(function (p, index) {
+    var caps = p.capabilities || {};
+    var capRows = [
+      ['权益查询', !!caps.entitlement],
+      ['用量 API', !!caps.usageApi],
+      ['请求拦截', !!caps.interceptParser && caps.interceptParser !== 'none'],
+      ['缓存指标', !!caps.cacheMetrics],
+      ['定价规则', !!caps.pricing]
+    ];
+    var capHtml = capRows.map(function (row) {
+      return '<div class="cap-item ' + (row[1] ? 'on' : '') + '">' + (row[1] ? '✓ ' : '· ') + escHtml(row[0]) + '</div>';
+    }).join('');
+    var modelText = (p.models || []).join(', ') || '未声明';
+    var fallbackText = p.usesGlobalFallback ? '，使用全局 DeepSeek 兼容 Key' : '';
+    var apiKeyValue = p.apiKey || '';
+    var apiBaseValue = p.apiBase || '';
+    var statusId = 'provider-status-' + index;
+    var stateText = p.capabilityState || getProviderTemplateState(p);
+
+    return '<div class="provider-card">'
+      + '<div class="provider-card-head">'
+      + '<div class="provider-name">' + escHtml(p.displayName || p.name) + '</div>'
+      + '<div class="provider-kind">' + escHtml(entitlementKindLabel(p.entitlementKind)) + '</div>'
+      + '</div>'
+      + '<div class="provider-state">' + escHtml(stateText) + '</div>'
+      + '<div class="form-row">'
+      + '<label class="form-label">API Key（当前服务商）</label>'
+      + '<input class="form-input" type="password" id="provider-apiKey-' + index + '" placeholder="sk-..." value="' + escAttr(apiKeyValue) + '">'
+      + '<div class="hint">' + (p.apiKeyMasked ? '当前已配置：' + escHtml(p.apiKeyMasked) : '未配置 API Key') + fallbackText + '</div>'
+      + '</div>'
+      + '<div class="form-row">'
+      + '<label class="form-label">API Base URL</label>'
+      + '<input class="form-input" id="provider-apiBase-' + index + '" placeholder="https://api.example.com" value="' + escAttr(apiBaseValue) + '">'
+      + '</div>'
+      + '<div class="hint">模型：' + escHtml(modelText) + '</div>'
+      + '<div class="hint">能力：' + escHtml(p.capabilitySummary || '能力待声明') + '</div>'
+      + '<div class="cap-list">' + capHtml + '</div>'
+      + '<div class="provider-actions">'
+      + '<button class="btn" onclick="saveProvider(' + index + ')">保存配置</button>'
+      + (isDeepSeekProvider(p) ? '' : '<button class="btn" onclick="removeProvider(' + index + ')">移除</button>')
+      + '</div>'
+      + '<div class="hint" id="' + statusId + '"></div>'
+      + '</div>';
+  }).join('');
+}
+
+function renderProviderPresetSelect(settings) {
+  var el = document.getElementById('provider-preset-select');
+  if (!el) return;
+  var providers = Array.isArray(settings.providers) ? settings.providers : [];
+  var configured = {};
+  providers.forEach(function (p) {
+    configured[(p.id || p.name || '').toLowerCase()] = true;
+    configured[(p.name || '').toLowerCase()] = true;
+  });
+  var options = PROVIDER_PRESETS.filter(function (p) {
+    return !configured[(p.id || '').toLowerCase()] && !configured[(p.name || '').toLowerCase()];
+  });
+  if (!options.length) {
+    el.innerHTML = '<option value="">已添加全部模板</option>';
+    el.disabled = true;
+    return;
+  }
+  el.disabled = false;
+  el.innerHTML = options.map(function (p) {
+    return '<option value="' + escAttr(p.id) + '">' + escHtml(getPresetOptionLabel(p)) + '</option>';
+  }).join('');
+}
+
+function getPresetOptionLabel(provider) {
+  var ready = provider.capabilities && provider.capabilities.entitlement;
+  return (ready ? '已支持 · ' : '模板 · ') + (provider.displayName || provider.name);
+}
+
+function getProviderTemplateState(provider) {
+  var caps = provider.capabilities || {};
+  if (provider.name === 'DeepSeek') {
+    return '已支持权益查询 / 支持拦截用量 / 支持缓存指标';
+  }
+  if (provider.name === 'Kimi' || provider.id === 'kimi') {
+    return caps.entitlement
+      ? '已支持权益查询 / 支持 OpenAI-compatible 拦截解析'
+      : '待接入权益查询 / 支持 OpenAI-compatible 拦截解析';
+  }
+  if (caps.entitlement) return '已支持权益查询';
+  return '模板配置 / 待验证官方权益接口';
+}
+
+function entitlementKindLabel(kind) {
+  return {
+    balance: '余额型',
+    quota: '套餐型',
+    credits: 'Credits',
+    billing: '账单型',
+    usageOnly: '仅用量',
+    unknown: '待确认'
+  }[kind] || '待确认';
 }
 
 function saveApiKey() {
@@ -475,9 +675,82 @@ function saveSetting(key, value) {
   postMsg('saveSetting', { key: key, value: value });
 }
 
+function addProviderFromPreset() {
+  if (!gSettings) return;
+  var select = document.getElementById('provider-preset-select');
+  var presetId = select ? select.value : '';
+  var preset = PROVIDER_PRESETS.find(function (p) { return p.id === presetId; });
+  if (!preset) return;
+  var providers = getEditableProviders();
+  var exists = providers.some(function (p) {
+    return (p.id && p.id === preset.id) || p.name === preset.name;
+  });
+  if (exists) {
+    setText('provider-save-status', '这个服务商已经添加过了');
+    return;
+  }
+  providers.push(cloneProvider(preset));
+  saveProviders(providers, '已添加 ' + (preset.displayName || preset.name));
+}
+
+function saveProvider(index) {
+  var providers = getEditableProviders();
+  if (!providers[index]) return;
+  var apiKeyEl = document.getElementById('provider-apiKey-' + index);
+  var apiBaseEl = document.getElementById('provider-apiBase-' + index);
+  providers[index].apiKey = apiKeyEl ? apiKeyEl.value.trim() : (providers[index].apiKey || '');
+  providers[index].apiBase = apiBaseEl ? apiBaseEl.value.trim().replace(/\/+$/, '') : (providers[index].apiBase || '');
+  saveProviders(providers, '已保存 ' + (providers[index].displayName || providers[index].name));
+  setText('provider-status-' + index, '保存中...');
+}
+
+function removeProvider(index) {
+  var providers = getEditableProviders();
+  if (!providers[index] || isDeepSeekProvider(providers[index])) return;
+  var removed = providers.splice(index, 1)[0];
+  saveProviders(providers, '已移除 ' + (removed.displayName || removed.name));
+}
+
+function getEditableProviders() {
+  var source = (gSettings && Array.isArray(gSettings.providers)) ? gSettings.providers : [];
+  return source.map(function (p) { return cloneProvider(p); });
+}
+
+function cloneProvider(provider) {
+  var next = {
+    id: provider.id,
+    name: provider.name,
+    displayName: provider.displayName,
+    type: provider.type || 'api',
+    apiBase: provider.apiBase || '',
+    apiKey: provider.apiKey || '',
+    entitlementKind: provider.entitlementKind || 'unknown',
+    capabilities: Object.assign({}, provider.capabilities || {}),
+    models: Array.isArray(provider.models) ? provider.models.slice() : []
+  };
+  if (Array.isArray(provider.localPaths) && provider.localPaths.length) {
+    next.localPaths = provider.localPaths.slice();
+  }
+  return next;
+}
+
+function saveProviders(providers, statusText) {
+  if (gSettings) {
+    gSettings.providers = providers.map(function (p) { return cloneProvider(p); });
+  }
+  setText('provider-save-status', statusText || '正在保存服务商配置...');
+  postMsg('saveSetting', { key: 'providers', value: providers.map(function (p) { return cloneProvider(p); }) });
+}
+
+function isDeepSeekProvider(provider) {
+  return (provider.id || '').toLowerCase() === 'deepseek' || provider.name === 'DeepSeek';
+}
+
 function showSaveStatus(key, success) {
   if (key === 'apiKey') {
     setText('api-key-status', success ? '已保存' : '保存失败');
+  } else if (key === 'providers') {
+    setText('provider-save-status', success ? '服务商配置已保存' : '服务商配置保存失败');
   }
 }
 
@@ -539,6 +812,7 @@ function normalizeSnapshot(raw) {
     lastEntryCount: 0
   }, snapshot.monitorStatus.local || {});
   snapshot.providerRows = Array.isArray(snapshot.providerRows) ? snapshot.providerRows : [];
+  snapshot.providers = Array.isArray(snapshot.providers) ? snapshot.providers : [];
   snapshot.modelRows = Array.isArray(snapshot.modelRows) ? snapshot.modelRows : [];
   snapshot.recentHistory = Array.isArray(snapshot.recentHistory) ? snapshot.recentHistory : [];
   snapshot.trend = Array.isArray(snapshot.trend) ? snapshot.trend : [];
@@ -582,6 +856,13 @@ function renderMetricLines(lines) {
   if (!lines || !lines.length) return '';
   return lines.map(function (line) {
     return '<div class="metric-line"><span>' + escHtml(line[0]) + '</span><span>' + escHtml(line[1]) + '</span></div>';
+  }).join('');
+}
+
+function renderCapabilityTags(tags) {
+  if (!tags || !tags.length) return '<span class="cap-tag muted">待声明</span>';
+  return tags.map(function (tag) {
+    return '<span class="cap-tag ' + (tag.enabled ? 'on' : 'muted') + '">' + escHtml(tag.label) + '</span>';
   }).join('');
 }
 
@@ -714,6 +995,39 @@ function fmtMoney(value, currency) {
   if (Math.abs(n) < 0.01) return symbol + n.toFixed(4);
   if (Math.abs(n) < 1) return symbol + n.toFixed(3);
   return symbol + n.toFixed(2);
+}
+
+function formatEntitlement(info) {
+  if (!info) return '未查询';
+  if (info.displayValue) return String(info.displayValue);
+  if (typeof info.primaryValue === 'number' && info.currency) {
+    return fmtMoney(info.primaryValue, info.currency);
+  }
+  if (info.primaryValue != null) {
+    return String(info.primaryValue) + (info.primaryUnit ? ' ' + info.primaryUnit : '');
+  }
+  return fmtMoney(info.balance || 0, info.currency);
+}
+
+function getEntitlementLines(info) {
+  if (!info) return [];
+  if (Array.isArray(info.items) && info.items.length) {
+    return info.items.map(function (item) {
+      return [item.label || '明细', item.value != null ? String(item.value) : ''];
+    }).filter(function (row) { return row[1] !== ''; });
+  }
+
+  var rows = [];
+  if (typeof info.totalUsed === 'number') {
+    rows.push(['已用', fmtMoney(info.totalUsed, info.currency)]);
+  }
+  if (typeof info.totalCharged === 'number') {
+    rows.push(['充值余额', fmtMoney(info.totalCharged, info.currency)]);
+  }
+  if (info.giftBalance && info.giftBalance > 0) {
+    rows.push(['赠送余额', fmtMoney(info.giftBalance, info.currency)]);
+  }
+  return rows;
 }
 
 function fmtTokens(value) {

@@ -1,7 +1,7 @@
 {
   "name": "tokenlens-monitor",
   "displayName": "TokenLens — Agent & LLM Usage Monitor",
-  "description": "监控 Claude Code、Codex、Copilot 等 AI 编程工具与 DeepSeek/OpenAI/Anthropic 等 LLM API 的 Token、费用、余额和缓存命中。状态栏 + 可视化面板。",
+  "description": "监控 Claude Code、Codex、Copilot 等 AI 编程工具与 DeepSeek/OpenAI/Anthropic 等 LLM API 的 Token、费用、账户权益和缓存命中。状态栏 + 可视化面板。",
   "version": "0.1.0",
   "publisher": "tokenlens",
   "engines": {
@@ -23,7 +23,7 @@
       },
       {
         "command": "tokenLens.refreshBalance",
-        "title": "TokenLens: 刷新余额和用量",
+        "title": "TokenLens: 刷新权益和用量",
         "icon": "$(refresh)"
       },
       {
@@ -48,31 +48,41 @@
         "tokenLens.apiKey": {
           "type": "string",
           "default": "",
-          "description": "DeepSeek API Key。配置后可查询平台余额。不配置也能通过 Agent/API 请求拦截自动追踪用量。"
+          "description": "默认 API Key。当前作为 DeepSeek 兼容 fallback；后续多服务商优先使用 provider 内的 apiKey。"
         },
         "tokenLens.providers": {
           "type": "array",
           "default": [
             {
+              "id": "deepseek",
               "name": "DeepSeek",
+              "displayName": "DeepSeek",
               "type": "api",
               "apiBase": "https://api.deepseek.com",
+              "entitlementKind": "balance",
+              "capabilities": {
+                "entitlement": true,
+                "usageApi": false,
+                "interceptParser": "openai",
+                "cacheMetrics": true,
+                "pricing": true
+              },
               "models": ["deepseek-chat", "deepseek-reasoner"]
             }
           ],
-          "description": "要监控的 LLM 提供商列表。支持 OpenAI 兼容 API（硅基流动、智谱、通义千问等）。"
+          "description": "要监控的 LLM 提供商列表。支持 provider-level API Key、账户权益类型和 OpenAI/Anthropic 兼容能力声明。"
         },
         "tokenLens.apiBase": {
           "type": "string",
           "default": "https://api.deepseek.com",
-          "description": "DeepSeek API 基础 URL。如使用代理或兼容端点可在此修改。"
+          "description": "默认 DeepSeek API 基础 URL。provider 内 apiBase 优先；此项保留作兼容 fallback。"
         },
         "tokenLens.balanceCheckInterval": {
           "type": "number",
           "default": 5,
           "minimum": 1,
           "maximum": 60,
-          "description": "余额自动查询间隔（分钟）。"
+          "description": "账户权益自动刷新间隔（分钟）。"
         },
         "tokenLens.usagePollInterval": {
           "type": "number",
@@ -130,16 +140,10 @@
           "minimum": 0,
           "description": "会话费用告警阈值（元）。超过此值弹出通知提醒。设为 0 关闭告警。"
         },
-        "tokenLens.statusBarDisplay": {
-          "type": "string",
-          "default": "cost-tokens-cache",
-          "enum": ["cost-only", "cost-tokens", "cost-tokens-cache", "cost-tokens-cache-context"],
-          "description": "状态栏显示内容。cost-only: 仅费用; cost-tokens: 费用+Token; cost-tokens-cache: 费用+Token+缓存命中; cost-tokens-cache-context: 全部信息含上下文占比。"
-        },
         "tokenLens.showNotificationOnUpdate": {
           "type": "boolean",
           "default": false,
-          "description": "余额或用量更新时弹出通知。"
+          "description": "账户权益或用量更新时弹出通知。"
         },
         "tokenLens.localMonitorPaths": {
           "type": "array",
@@ -189,6 +193,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node tests/run-tests.js",
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {

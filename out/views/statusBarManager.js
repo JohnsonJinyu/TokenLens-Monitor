@@ -41,10 +41,9 @@ exports.StatusBarManager = void 0;
 const vscode = __importStar(require("vscode"));
 const settings_1 = require("../config/settings");
 class StatusBarManager {
-    constructor(tracker, storage, getMonitorStatus) {
+    constructor(tracker, _storage, getMonitorStatus) {
         this.lastAlertedCost = 0;
         this.tracker = tracker;
-        this.storage = storage;
         this.getMonitorStatus = getMonitorStatus;
         this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
         this.item.name = 'TokenLens';
@@ -62,21 +61,9 @@ class StatusBarManager {
     refresh(stats) {
         const primaryBalance = this.getPrimaryBalance(stats);
         const ctxPct = stats.lastContextPercent ?? 0;
-        const parts = ['$(pulse)'];
-        if (primaryBalance) {
-            parts.push(this.fmtMoney(primaryBalance.balance, primaryBalance.currency));
-            if (ctxPct > 0) {
-                parts.push(`${ctxPct}% ctx`);
-            }
-            else {
-                parts.push(this.fmtMoney(stats.totalCost));
-            }
-        }
-        else {
-            parts.push(this.fmtMoney(stats.totalCost));
-            parts.push(`${this.fmtTokens(stats.totalTokens)} t`);
-        }
-        this.item.text = parts.join(' · ');
+        this.item.text = primaryBalance
+            ? `$(pulse) ${this.formatEntitlement(primaryBalance)}`
+            : '$(pulse) 未查询';
         this.applyContextBackground(ctxPct);
         this.maybeShowCostAlert(stats.totalCost);
         this.item.tooltip = this.buildTooltip(stats);
@@ -110,12 +97,9 @@ class StatusBarManager {
         const md = new vscode.MarkdownString();
         md.isTrusted = true;
         const status = this.safeMonitorStatus();
-        const history = this.storage.getUsageHistory();
-        const last24h = this.buildLast24h(history);
-        const cache = stats ? this.buildCacheSummary(stats) : { hitTokens: 0, missTokens: 0, hitRate: null };
         const primaryBalance = stats ? this.getPrimaryBalance(stats) : undefined;
         const balanceText = primaryBalance
-            ? `${this.fmtMoney(primaryBalance.balance, primaryBalance.currency)} (${primaryBalance.provider})`
+            ? `${this.formatEntitlement(primaryBalance)} (${primaryBalance.provider})`
             : ((0, settings_1.getApiKey)() ? '等待接口返回' : '未配置 API Key');
         const apiState = status.api.configured
             ? (status.api.lastError ? `异常：${this.compactText(status.api.lastError)}` : '可用')
@@ -126,29 +110,16 @@ class StatusBarManager {
         const lines = [];
         lines.push('### TokenLens');
         lines.push('');
-        lines.push(`**余额**  ${balanceText}`);
-        lines.push('');
-        lines.push('**本次会话**');
-        lines.push(`费用：${stats ? this.fmtMoney(stats.totalCost) : this.fmtMoney(0)}`);
-        lines.push(`Token：${stats ? this.fmtTokens(stats.totalTokens) : '0'}　请求：${stats ? stats.totalRequests : 0} 次`);
-        lines.push('');
-        lines.push('**近 24 小时**');
-        lines.push(`费用：${this.fmtMoney(last24h.cost)}`);
-        lines.push(`Token：${this.fmtTokens(last24h.tokens)}　请求：${last24h.requests} 次`);
+        lines.push(`**账户权益**  ${balanceText}`);
+        if (primaryBalance?.fetchedAt) {
+            lines.push(`更新时间：${this.fmtTime(primaryBalance.fetchedAt)}`);
+        }
         lines.push('');
         lines.push('**状态**');
-        lines.push(`API 查询：${apiState}`);
+        lines.push(`权益查询：${apiState}`);
         lines.push(`HTTP 拦截：${httpState}`);
-        if (cache.hitRate != null || stats?.lastContextPercent) {
-            lines.push('');
-            lines.push('**补充**');
-            if (cache.hitRate != null) {
-                lines.push(`缓存命中：${cache.hitRate.toFixed(1)}%`);
-            }
-            if (stats?.lastContextPercent) {
-                lines.push(`上下文：${stats.lastContextPercent}% ${stats.lastModel}`);
-            }
-        }
+        lines.push('');
+        lines.push('费用、Token、缓存命中和趋势详情请打开左侧用量面板查看。');
         lines.push('');
         lines.push('[打开用量面板](command:tokenLens.showDashboard)');
         md.appendMarkdown(lines.join('\n'));
@@ -166,30 +137,17 @@ class StatusBarManager {
         }
         return rows.sort((a, b) => b.balance - a.balance);
     }
-    buildCacheSummary(stats) {
-        let hitTokens = 0;
-        let missTokens = 0;
-        for (const [, ps] of stats.byProvider) {
-            for (const [, model] of ps.byModel) {
-                hitTokens += model.cacheHitTokens;
-                missTokens += model.cacheMissTokens;
-            }
+    formatEntitlement(info) {
+        if (info.displayValue) {
+            return info.displayValue;
         }
-        const total = hitTokens + missTokens;
-        return {
-            hitTokens,
-            missTokens,
-            hitRate: total > 0 ? (hitTokens / total) * 100 : null,
-        };
-    }
-    buildLast24h(history) {
-        const since = Date.now() - 24 * 60 * 60 * 1000;
-        return history.filter((entry) => entry.timestamp >= since).reduce((acc, entry) => {
-            acc.requests += 1;
-            acc.tokens += entry.promptTokens + entry.completionTokens;
-            acc.cost += entry.cost;
-            return acc;
-        }, { requests: 0, tokens: 0, cost: 0 });
+        if (typeof info.primaryValue === 'number' && info.currency) {
+            return this.fmtMoney(info.primaryValue, info.currency);
+        }
+        if (info.primaryValue !== undefined && info.primaryValue !== null) {
+            return `${info.primaryValue}${info.primaryUnit ? ` ${info.primaryUnit}` : ''}`;
+        }
+        return this.fmtMoney(info.balance, info.currency);
     }
     safeMonitorStatus() {
         try {
@@ -198,7 +156,7 @@ class StatusBarManager {
         catch {
             return {
                 http: { running: false, lastRequestAt: 0, lastUsageAt: 0, seenRequests: 0, parsedUsages: 0, missingUsageResponses: 0 },
-                api: { running: false, configured: false, lastBalanceAt: 0, lastUsageAt: 0, lastError: '状态不可用', lastEntryCount: 0 },
+                api: { running: false, configured: false, lastBalanceAt: 0, lastUsageAt: 0, lastError: '状态不可用', lastEntryCount: 0, providers: [] },
                 local: { running: false, configured: false, lastScanAt: 0, lastError: '状态不可用', lastEntryCount: 0 },
             };
         }
@@ -215,15 +173,6 @@ class StatusBarManager {
             return `${symbol}${value.toFixed(3)}`;
         }
         return `${symbol}${value.toFixed(2)}`;
-    }
-    fmtTokens(n) {
-        if (n >= 1000000) {
-            return `${(n / 1000000).toFixed(2)}M`;
-        }
-        if (n >= 1000) {
-            return `${(n / 1000).toFixed(1)}k`;
-        }
-        return String(Math.round(n));
     }
     fmtTime(ts) {
         if (!ts) {

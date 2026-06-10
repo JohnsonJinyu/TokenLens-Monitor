@@ -4,11 +4,11 @@
  *
  * 三种数据来源（优先级从高到低）：
  *  1. HTTP 拦截 — Monkey-patch https.request，自动捕获所有 LLM API 请求
- *  2. API 模式 — 通过 DeepSeek/OpenAI 兼容 API 定时查询余额和用量
+ *  2. API 模式 — 通过 DeepSeek/OpenAI 兼容 API 定时查询账户权益和用量
  *  3. Local 模式 — 扫描本地缓存/日志文件解析用量数据
  *
  * UI：
- *  - 状态栏 (StatusBar) 实时显示费用/Token，悬停查看详情
+ *  - 状态栏 (StatusBar) 实时显示主账户权益，悬停查看详情
  *  - 侧栏 Webview 仪表板，展示图表和缓存命中率
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
@@ -78,6 +78,7 @@ function activate(context) {
                 lastUsageAt: 0,
                 lastError: '',
                 lastEntryCount: 0,
+                providers: [],
             },
             local: localMonitor?.getStatus() ?? {
                 running: false,
@@ -137,23 +138,24 @@ function activate(context) {
                 console.error('[TokenLens] 初始扫描失败:', e);
             });
         }
-        // 🔥 有 API Key 时立即拉取余额和近期用量
+        // 🔥 有 API Key 时立即拉取账户权益和近期用量
         const apiProviders = registry_1.registry.getApiProviders();
         const apiKey = (0, settings_1.getApiKey)();
-        if (apiKey && apiProviders.length > 0) {
-            console.log('[TokenLens] 检测到 API Key，立即拉取余额...');
+        const hasApiKey = apiProviders.some((provider) => provider.config.apiKey || (provider.config.name === 'DeepSeek' && apiKey));
+        if (hasApiKey && apiProviders.length > 0) {
+            console.log('[TokenLens] 检测到 API Key，立即拉取账户权益...');
             apiMonitor.refreshAll(apiProviders).then(() => {
                 const stats = tracker.getStats();
                 console.log(`[TokenLens] 初始拉取完成: ${stats.totalRequests} 条记录`);
-                // 检查余额
+                // 检查账户权益
                 for (const [, ps] of stats.byProvider) {
                     if (ps.balance) {
-                        console.log(`[TokenLens] ${ps.provider} 余额: ${ps.balance.balance} ${ps.balance.currency}`);
+                        console.log(`[TokenLens] ${ps.provider} 权益: ${ps.balance.displayValue ?? `${ps.balance.balance} ${ps.balance.currency}`}`);
                     }
                 }
             }).catch((e) => {
                 console.error('[TokenLens] 初始 API 拉取失败:', e);
-                vscode.window.showWarningMessage('⚠️ TokenLens: API 余额查询失败，请检查 API Key 和网络');
+                vscode.window.showWarningMessage('⚠️ TokenLens: API 权益查询失败，请检查 API Key 和网络');
             });
         }
     }
@@ -170,6 +172,7 @@ function activate(context) {
             lastUsageAt: 0,
             lastError: 'API 监控器未初始化',
             lastEntryCount: 0,
+            providers: [],
         },
         local: localMonitor?.getStatus() ?? {
             running: false,
@@ -184,16 +187,16 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('tokenLens.showDashboard', () => {
         vscode.commands.executeCommand('workbench.view.extension.tokenlens-monitor-sidebar');
     }), vscode.commands.registerCommand('tokenLens.refreshBalance', async () => {
-        const providers = registry_1.registry.getApiProviders();
+        const providers = registry_1.registry.getApiProviders().filter((provider) => provider.config.capabilities?.entitlement !== false);
         if (providers.length === 0) {
-            vscode.window.showWarningMessage('没有配置 API 提供商');
+            vscode.window.showInformationMessage('当前没有已支持权益查询的 API 服务商；模板服务商会先通过请求拦截统计用量。');
             return;
         }
-        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在刷新余额...' }, async () => {
-            await apiMonitor.refreshAll(providers);
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在刷新权益...' }, async () => {
+            await apiMonitor.refreshEntitlements(providers);
             await localMonitor.forceScanAll(registry_1.registry.getLocalProviders());
         });
-        vscode.window.showInformationMessage('✅ 余额和用量已刷新');
+        vscode.window.showInformationMessage('✅ 权益和用量已刷新');
     }), vscode.commands.registerCommand('tokenLens.toggleMonitor', () => {
         if (apiMonitor.isRunning) {
             stopAllMonitors();
@@ -257,9 +260,10 @@ function initProviders() {
     for (const config of providers) {
         const nextConfig = { ...config };
         if (nextConfig.name === 'DeepSeek') {
-            nextConfig.apiBase = apiBase;
+            const hasCustomProviderBase = nextConfig.apiBase && nextConfig.apiBase !== 'https://api.deepseek.com';
+            nextConfig.apiBase = hasCustomProviderBase ? nextConfig.apiBase : apiBase;
         }
-        if (nextConfig.type === 'api' && apiKey && !nextConfig.apiKey) {
+        if (nextConfig.type === 'api' && nextConfig.name === 'DeepSeek' && apiKey && !nextConfig.apiKey) {
             nextConfig.apiKey = apiKey;
         }
         if (nextConfig.type === 'local' && localPaths.length > 0) {

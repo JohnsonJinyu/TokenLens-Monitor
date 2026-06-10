@@ -4,6 +4,7 @@
 
 import { BaseProvider, ProviderConfig } from './base';
 import { DeepSeekProvider } from './deepseek';
+import { KimiProvider } from './kimi';
 import { OpenAICompatProvider } from './openaiCompat';
 import { LocalProvider } from './localProvider';
 
@@ -28,6 +29,8 @@ export class ProviderRegistry {
 
     if (config.name === 'DeepSeek') {
       provider = new DeepSeekProvider(config);
+    } else if (config.name === 'Kimi' || config.name === 'Moonshot' || config.id === 'kimi') {
+      provider = new KimiProvider(config);
     } else if (config.type === 'local') {
       provider = new LocalProvider(config);
     } else {

@@ -1,7 +1,7 @@
 "use strict";
 /**
  * 本地模式监控器 —— 定时扫描本地缓存/日志文件来统计用量。
- * 适用于不支持 API 查询余额的平台，或作为辅助数据源。
+ * 适用于不支持 API 查询账户权益的平台，或作为辅助数据源。
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;

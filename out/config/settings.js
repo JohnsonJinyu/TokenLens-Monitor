@@ -47,7 +47,6 @@ exports.getContextWindowSizes = getContextWindowSizes;
 exports.getContextWarnThreshold = getContextWarnThreshold;
 exports.getContextCriticalThreshold = getContextCriticalThreshold;
 exports.getCostAlertThreshold = getCostAlertThreshold;
-exports.getStatusBarDisplay = getStatusBarDisplay;
 exports.getShowNotificationOnUpdate = getShowNotificationOnUpdate;
 exports.getShowCacheHitRate = getShowCacheHitRate;
 exports.getTheme = getTheme;
@@ -95,10 +94,6 @@ function getContextCriticalThreshold() {
 // ---- Cost Alert ----
 function getCostAlertThreshold() {
     return vscode.workspace.getConfiguration(SECTION).get('costAlertThreshold', 10);
-}
-// ---- Display ----
-function getStatusBarDisplay() {
-    return vscode.workspace.getConfiguration(SECTION).get('statusBarDisplay', 'cost-tokens-cache');
 }
 function getShowNotificationOnUpdate() {
     return vscode.workspace.getConfiguration(SECTION).get('showNotificationOnUpdate', false);

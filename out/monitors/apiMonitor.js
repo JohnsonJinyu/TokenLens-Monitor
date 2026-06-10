@@ -1,20 +1,23 @@
 "use strict";
 /**
- * API 模式监控器 —— 通过定时轮询各提供商的 API 来获取余额和用量。
+ * API 模式监控器 —— 通过定时轮询各提供商的 API 来获取账户权益和用量。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ApiMonitor = void 0;
 const settings_1 = require("../config/settings");
+const apiMonitorPolicy_1 = require("./apiMonitorPolicy");
 class ApiMonitor {
     constructor(tracker) {
         this.balanceInterval = null;
         this.usageInterval = null;
         this.running = false;
         this.apiKey = '';
+        this.hasAnyApiKey = false;
         this.lastBalanceAt = 0;
         this.lastUsageAt = 0;
         this.lastError = '';
         this.lastEntryCount = 0;
+        this.providerStatus = new Map();
         /** 上次请求 ID 去重 */
         this.seenRequestIds = new Set();
         this.tracker = tracker;
@@ -25,10 +28,12 @@ class ApiMonitor {
             return;
         }
         this.syncApiKey();
+        this.syncProviderStatuses(providers);
+        this.hasAnyApiKey = this.hasConfiguredProvider(providers);
         this.lastError = '';
-        if (!this.apiKey || providers.length === 0) {
+        if (!this.hasAnyApiKey) {
             console.log('[TokenLens] API 监控未启动：缺少 API Key 或没有 API 提供商');
-            this.lastError = !this.apiKey ? 'API Key 未配置' : '没有 API 提供商';
+            this.lastError = providers.length === 0 ? '没有 API 提供商' : 'API Key 未配置';
             return;
         }
         this.running = true;
@@ -37,7 +42,7 @@ class ApiMonitor {
         // 立即执行一次
         this.pollBalance(providers);
         this.pollUsage(providers);
-        // 定时余额
+        // 定时账户权益
         this.balanceInterval = setInterval(() => {
             this.pollBalance(providers);
         }, intervalMs);
@@ -45,7 +50,7 @@ class ApiMonitor {
         this.usageInterval = setInterval(() => {
             this.pollUsage(providers);
         }, 30000);
-        console.log(`[TokenLens] API 监控已启动，余额查询间隔: ${intervalMinutes} 分钟`);
+        console.log(`[TokenLens] API 监控已启动，权益刷新间隔: ${intervalMinutes} 分钟`);
     }
     /** 停止 API 监控 */
     stop() {
@@ -60,41 +65,63 @@ class ApiMonitor {
         }
         console.log('[TokenLens] API 监控已停止');
     }
-    /** 轮询余额 */
+    /** 轮询账户权益 */
     async pollBalance(providers) {
         this.syncApiKey();
-        if (!this.apiKey) {
-            this.lastError = 'API Key 未配置';
-            return;
-        }
         for (const provider of providers) {
+            const status = this.ensureProviderStatus(provider);
+            if (!(0, apiMonitorPolicy_1.isEntitlementPollingEnabled)(provider.config)) {
+                status.capabilitySkippedReason = '权益查询待适配';
+                status.entitlementEnabled = false;
+                continue;
+            }
+            const apiKey = this.getProviderApiKey(provider);
+            status.hasApiKey = !!apiKey;
+            if (!apiKey) {
+                status.lastError = 'API Key 未配置';
+                this.lastError = `${provider.id} API Key 未配置`;
+                continue;
+            }
             try {
-                const balance = await provider.fetchBalance(this.apiKey);
+                const balance = await provider.fetchBalance(apiKey);
                 if (balance) {
                     this.tracker.updateBalance(provider.id, balance);
                     this.lastBalanceAt = Date.now();
+                    status.lastEntitlementAt = this.lastBalanceAt;
+                    status.lastError = '';
+                    status.capabilitySkippedReason = '';
                     this.lastError = '';
                 }
                 else {
-                    this.lastError = '余额接口未返回可用余额';
+                    status.lastError = '权益接口未返回可用数据';
+                    this.lastError = '权益接口未返回可用数据';
                 }
             }
             catch (e) {
-                this.lastError = e instanceof Error ? e.message : String(e);
-                console.error(`[TokenLens] ${provider.id} 余额查询失败:`, e);
+                status.lastError = e instanceof Error ? e.message : String(e);
+                this.lastError = status.lastError;
+                console.error(`[TokenLens] ${provider.id} 权益查询失败:`, e);
             }
         }
     }
     /** 轮询用量 */
     async pollUsage(providers) {
         this.syncApiKey();
-        if (!this.apiKey) {
-            this.lastError = 'API Key 未配置';
-            return;
-        }
         for (const provider of providers) {
+            const status = this.ensureProviderStatus(provider);
+            if (!(0, apiMonitorPolicy_1.isUsageApiPollingEnabled)(provider.config)) {
+                status.usageApiEnabled = false;
+                continue;
+            }
+            const apiKey = this.getProviderApiKey(provider);
+            status.hasApiKey = !!apiKey;
+            if (!apiKey) {
+                status.lastError = 'API Key 未配置';
+                this.lastError = `${provider.id} API Key 未配置`;
+                continue;
+            }
             try {
-                const entries = await provider.fetchRecentUsage(this.apiKey, 1);
+                const entries = await provider.fetchRecentUsage(apiKey, 1);
                 // 去重
                 const newEntries = entries.filter((e) => {
                     const id = `${e.provider}-${e.model}-${e.timestamp}-${e.promptTokens}-${e.completionTokens}`;
@@ -108,11 +135,14 @@ class ApiMonitor {
                     this.tracker.recordUsage(newEntries);
                 }
                 this.lastUsageAt = Date.now();
+                status.lastUsageAt = this.lastUsageAt;
+                status.lastError = '';
                 this.lastEntryCount = newEntries.length;
                 this.lastError = '';
             }
             catch (e) {
-                this.lastError = e instanceof Error ? e.message : String(e);
+                status.lastError = e instanceof Error ? e.message : String(e);
+                this.lastError = status.lastError;
                 console.error(`[TokenLens] ${provider.id} 用量查询失败:`, e);
             }
         }
@@ -125,10 +155,23 @@ class ApiMonitor {
     /** 手动刷新全部 */
     async refreshAll(providers) {
         this.syncApiKey();
+        this.syncProviderStatuses(providers);
+        this.hasAnyApiKey = this.hasConfiguredProvider(providers);
         await Promise.all([
             this.pollBalance(providers),
             this.pollUsage(providers),
         ]);
+    }
+    async refreshEntitlements(providers) {
+        this.syncApiKey();
+        this.syncProviderStatuses(providers);
+        const entitlementProviders = providers.filter((provider) => (0, apiMonitorPolicy_1.isEntitlementPollingEnabled)(provider.config));
+        this.hasAnyApiKey = this.hasConfiguredProvider(providers);
+        if (entitlementProviders.length === 0) {
+            return 0;
+        }
+        await this.pollBalance(entitlementProviders);
+        return entitlementProviders.length;
     }
     get isRunning() {
         return this.running;
@@ -136,15 +179,59 @@ class ApiMonitor {
     getStatus() {
         return {
             running: this.running,
-            configured: !!(0, settings_1.getApiKey)(),
+            configured: this.hasAnyApiKey || !!this.apiKey,
             lastBalanceAt: this.lastBalanceAt,
             lastUsageAt: this.lastUsageAt,
             lastError: this.lastError,
             lastEntryCount: this.lastEntryCount,
+            providers: Array.from(this.providerStatus.values()),
         };
     }
     syncApiKey() {
         this.apiKey = (0, settings_1.getApiKey)();
+    }
+    getProviderApiKey(provider) {
+        return (0, apiMonitorPolicy_1.resolveProviderApiKey)(provider.config, this.apiKey);
+    }
+    hasConfiguredProvider(providers) {
+        return providers.some((provider) => !!this.getProviderApiKey(provider));
+    }
+    syncProviderStatuses(providers) {
+        const active = new Set(providers.map((provider) => provider.id));
+        for (const key of Array.from(this.providerStatus.keys())) {
+            if (!active.has(key)) {
+                this.providerStatus.delete(key);
+            }
+        }
+        providers.forEach((provider) => this.ensureProviderStatus(provider));
+    }
+    ensureProviderStatus(provider) {
+        let status = this.providerStatus.get(provider.id);
+        if (!status) {
+            status = {
+                provider: provider.id,
+                displayName: provider.config.displayName || provider.id,
+                lastEntitlementAt: 0,
+                lastUsageAt: 0,
+                lastError: '',
+                capabilitySkippedReason: '',
+                entitlementEnabled: (0, apiMonitorPolicy_1.isEntitlementPollingEnabled)(provider.config),
+                usageApiEnabled: (0, apiMonitorPolicy_1.isUsageApiPollingEnabled)(provider.config),
+                hasApiKey: !!this.getProviderApiKey(provider),
+            };
+            this.providerStatus.set(provider.id, status);
+        }
+        status.displayName = provider.config.displayName || provider.id;
+        status.entitlementEnabled = (0, apiMonitorPolicy_1.isEntitlementPollingEnabled)(provider.config);
+        status.usageApiEnabled = (0, apiMonitorPolicy_1.isUsageApiPollingEnabled)(provider.config);
+        status.hasApiKey = !!this.getProviderApiKey(provider);
+        if (!status.entitlementEnabled && !status.capabilitySkippedReason) {
+            status.capabilitySkippedReason = '模板配置，未启用权益查询';
+        }
+        else if (status.entitlementEnabled && status.capabilitySkippedReason === '模板配置，未启用权益查询') {
+            status.capabilitySkippedReason = '';
+        }
+        return status;
     }
 }
 exports.ApiMonitor = ApiMonitor;

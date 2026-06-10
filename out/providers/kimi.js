@@ -1,7 +1,7 @@
 "use strict";
 /**
- * DeepSeek 提供商 —— 通过官方 API 查询账户权益和模型列表
- * API 文档参考: https://platform.deepseek.com/api-docs
+ * Kimi / Moonshot provider.
+ * Official balance endpoint: GET /v1/users/me/balance
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -37,50 +37,10 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DeepSeekProvider = void 0;
-exports.mapDeepSeekBalanceResponse = mapDeepSeekBalanceResponse;
+exports.KimiProvider = void 0;
+exports.mapKimiBalanceResponse = mapKimiBalanceResponse;
 const https = __importStar(require("https"));
 const base_1 = require("./base");
-function mapDeepSeekBalanceResponse(data, fetchedAt = Date.now()) {
-    if (!data.is_available || !data.balance_infos?.length) {
-        return null;
-    }
-    const info = data.balance_infos[0];
-    const toppedUpBalance = Number(info.topped_up_balance) || 0;
-    const totalBalance = Number(info.total_balance) || 0;
-    const grantedBalance = Number(info.granted_balance) || 0;
-    const currency = info.currency || 'CNY';
-    const items = [
-        {
-            label: '充值余额',
-            value: formatMoney(toppedUpBalance, currency),
-            rawValue: toppedUpBalance,
-            unit: currency,
-        },
-    ];
-    if (grantedBalance > 0) {
-        items.push({
-            label: '赠送余额',
-            value: formatMoney(grantedBalance, currency),
-            rawValue: grantedBalance,
-            unit: currency,
-        });
-    }
-    return {
-        kind: 'balance',
-        label: '账户余额',
-        primaryLabel: '可用余额',
-        primaryValue: totalBalance,
-        displayValue: formatMoney(totalBalance, currency),
-        items,
-        source: '/user/balance',
-        confidence: 'official',
-        balance: totalBalance,
-        giftBalance: grantedBalance,
-        currency,
-        fetchedAt,
-    };
-}
 function httpsGet(url, apiKey) {
     return new Promise((resolve, reject) => {
         const u = new URL(url);
@@ -98,14 +58,14 @@ function httpsGet(url, apiKey) {
             res.on('data', (chunk) => (body += chunk.toString()));
             res.on('end', () => {
                 if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                    reject(new Error(`DeepSeek API 返回 ${res.statusCode ?? '未知状态'}: ${body.slice(0, 200)}`));
+                    reject(new Error(`Kimi API 返回 ${res.statusCode ?? '未知状态'}: ${body.slice(0, 200)}`));
                     return;
                 }
                 try {
                     resolve(JSON.parse(body));
                 }
                 catch {
-                    reject(new Error(`解析 DeepSeek 响应失败: ${body.slice(0, 200)}`));
+                    reject(new Error(`解析 Kimi 响应失败: ${body.slice(0, 200)}`));
                 }
             });
         });
@@ -117,66 +77,78 @@ function httpsGet(url, apiKey) {
         req.end();
     });
 }
-class DeepSeekProvider extends base_1.BaseProvider {
+function mapKimiBalanceResponse(data, fetchedAt = Date.now()) {
+    const source = data.data ?? data;
+    const availableBalance = Number(source.available_balance) || 0;
+    const cashBalance = Number(source.cash_balance) || 0;
+    const voucherBalance = Number(source.voucher_balance) || 0;
+    const currency = 'CNY';
+    if (source.available_balance == null &&
+        source.cash_balance == null &&
+        source.voucher_balance == null) {
+        return null;
+    }
+    return {
+        kind: 'balance',
+        label: 'Kimi 账户余额',
+        primaryLabel: '可用余额',
+        primaryValue: availableBalance,
+        displayValue: formatMoney(availableBalance, currency),
+        items: [
+            {
+                label: '现金余额',
+                value: formatMoney(cashBalance, currency),
+                rawValue: cashBalance,
+                unit: currency,
+            },
+            {
+                label: '代金券余额',
+                value: formatMoney(voucherBalance, currency),
+                rawValue: voucherBalance,
+                unit: currency,
+            },
+        ],
+        source: '/v1/users/me/balance',
+        confidence: 'official',
+        balance: availableBalance,
+        giftBalance: voucherBalance,
+        currency,
+        fetchedAt,
+    };
+}
+class KimiProvider extends base_1.BaseProvider {
     constructor(config) {
         super({
-            id: 'deepseek',
-            name: 'DeepSeek',
-            displayName: 'DeepSeek',
+            id: 'kimi',
+            name: 'Kimi',
+            displayName: 'Kimi / Moonshot',
             type: 'api',
-            apiBase: 'https://api.deepseek.com',
+            apiBase: 'https://api.moonshot.cn',
             entitlementKind: 'balance',
             capabilities: {
                 entitlement: true,
                 usageApi: false,
                 interceptParser: 'openai',
-                cacheMetrics: true,
-                pricing: true,
+                cacheMetrics: false,
+                pricing: false,
             },
-            models: ['deepseek-chat', 'deepseek-reasoner'],
+            models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
             ...config,
-        });
-        // 默认定价 (deepseek-chat 缓存命中 ¥0.1/M)
-        this.setPricing('deepseek-chat', {
-            input: 1.0,
-            output: 2.0,
-            currency: 'CNY',
-            cacheHitDiscount: 0.1,
-        });
-        this.setPricing('deepseek-reasoner', {
-            input: 4.0,
-            output: 16.0,
-            currency: 'CNY',
         });
     }
     async fetchBalance(apiKey) {
-        try {
-            const data = await httpsGet(`${this.config.apiBase}/user/balance`, apiKey);
-            return mapDeepSeekBalanceResponse(data);
-        }
-        catch (e) {
-            console.error('[TokenLens] 获取余额失败:', e);
-            throw e;
-        }
+        const base = (this.config.apiBase || 'https://api.moonshot.cn').replace(/\/+$/, '');
+        const data = await httpsGet(`${base}/v1/users/me/balance`, apiKey);
+        return mapKimiBalanceResponse(data);
     }
-    async fetchModels(apiKey) {
-        const data = await httpsGet(`${this.config.apiBase}/models`, apiKey);
-        return (data.data ?? []).map((model) => ({
-            id: model.id,
-            ownedBy: model.owned_by,
-        }));
-    }
-    async fetchRecentUsage(apiKey, days = 7) {
-        // DeepSeek 官方 API 目前只公开账户权益查询，没有近期用量查询端点。
-        // 用量数据依赖 HTTP 拦截或本地日志解析，避免轮询不存在的 /v1/usage 导致 404 误报。
+    async fetchRecentUsage(_apiKey, _days = 7) {
         return [];
     }
-    /** DeepSeek 是纯 API 模式，不实现本地解析 */
     async parseLocalUsage(_paths) {
         return [];
     }
 }
-exports.DeepSeekProvider = DeepSeekProvider;
+exports.KimiProvider = KimiProvider;
 function formatMoney(value, currency) {
     const symbol = currency === 'USD' ? '$' : '¥';
     if (value === 0) {
@@ -190,4 +162,4 @@ function formatMoney(value, currency) {
     }
     return `${symbol}${value.toFixed(2)}`;
 }
-//# sourceMappingURL=deepseek.js.map
+//# sourceMappingURL=kimi.js.map

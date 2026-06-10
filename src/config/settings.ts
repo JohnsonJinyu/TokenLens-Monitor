@@ -57,11 +57,6 @@ export function getCostAlertThreshold(): number {
   return vscode.workspace.getConfiguration(SECTION).get<number>('costAlertThreshold', 10);
 }
 
-// ---- Display ----
-export function getStatusBarDisplay(): string {
-  return vscode.workspace.getConfiguration(SECTION).get<string>('statusBarDisplay', 'cost-tokens-cache');
-}
-
 export function getShowNotificationOnUpdate(): boolean {
   return vscode.workspace.getConfiguration(SECTION).get<boolean>('showNotificationOnUpdate', false);
 }

@@ -5,6 +5,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registry = exports.ProviderRegistry = void 0;
 const deepseek_1 = require("./deepseek");
+const kimi_1 = require("./kimi");
 const openaiCompat_1 = require("./openaiCompat");
 const localProvider_1 = require("./localProvider");
 class ProviderRegistry {
@@ -29,6 +30,9 @@ class ProviderRegistry {
         let provider;
         if (config.name === 'DeepSeek') {
             provider = new deepseek_1.DeepSeekProvider(config);
+        }
+        else if (config.name === 'Kimi' || config.name === 'Moonshot' || config.id === 'kimi') {
+            provider = new kimi_1.KimiProvider(config);
         }
         else if (config.type === 'local') {
             provider = new localProvider_1.LocalProvider(config);

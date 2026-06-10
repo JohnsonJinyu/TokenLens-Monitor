@@ -150,8 +150,8 @@ export class UsageTracker {
       }
     }
 
-    // 余额查询可能先于任何请求完成。不要因为暂无用量就丢掉 provider，
-    // 否则面板会一直停留在引导态，看不到余额和运行状态。
+    // 权益查询可能先于任何请求完成。不要因为暂无用量就丢掉 provider，
+    // 否则面板会一直停留在引导态，看不到账户权益和运行状态。
     for (const [provider] of Object.entries(balanceCache)) {
       if (!byProvider.has(provider)) {
         byProvider.set(provider, makeProviderStats(provider));

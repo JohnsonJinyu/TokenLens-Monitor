@@ -1,5 +1,5 @@
 /**
- * DeepSeek 提供商 —— 通过官方 API 查询余额和模型列表
+ * DeepSeek 提供商 —— 通过官方 API 查询账户权益和模型列表
  * API 文档参考: https://platform.deepseek.com/api-docs
  */
 
@@ -35,6 +35,49 @@ interface DeepSeekModelsResponse {
     object?: string;
     owned_by?: string;
   }>;
+}
+
+export function mapDeepSeekBalanceResponse(data: DeepSeekBalanceResponse, fetchedAt: number = Date.now()): BalanceInfo | null {
+  if (!data.is_available || !data.balance_infos?.length) {
+    return null;
+  }
+
+  const info = data.balance_infos[0];
+  const toppedUpBalance = Number(info.topped_up_balance) || 0;
+  const totalBalance = Number(info.total_balance) || 0;
+  const grantedBalance = Number(info.granted_balance) || 0;
+  const currency = info.currency || 'CNY';
+  const items = [
+    {
+      label: '充值余额',
+      value: formatMoney(toppedUpBalance, currency),
+      rawValue: toppedUpBalance,
+      unit: currency,
+    },
+  ];
+  if (grantedBalance > 0) {
+    items.push({
+      label: '赠送余额',
+      value: formatMoney(grantedBalance, currency),
+      rawValue: grantedBalance,
+      unit: currency,
+    });
+  }
+
+  return {
+    kind: 'balance',
+    label: '账户余额',
+    primaryLabel: '可用余额',
+    primaryValue: totalBalance,
+    displayValue: formatMoney(totalBalance, currency),
+    items,
+    source: '/user/balance',
+    confidence: 'official',
+    balance: totalBalance,
+    giftBalance: grantedBalance,
+    currency,
+    fetchedAt,
+  };
 }
 
 function httpsGet(url: string, apiKey: string): Promise<any> {
@@ -79,9 +122,19 @@ function httpsGet(url: string, apiKey: string): Promise<any> {
 export class DeepSeekProvider extends BaseProvider {
   constructor(config?: Partial<ProviderConfig>) {
     super({
+      id: 'deepseek',
       name: 'DeepSeek',
+      displayName: 'DeepSeek',
       type: 'api',
       apiBase: 'https://api.deepseek.com',
+      entitlementKind: 'balance',
+      capabilities: {
+        entitlement: true,
+        usageApi: false,
+        interceptParser: 'openai',
+        cacheMetrics: true,
+        pricing: true,
+      },
       models: ['deepseek-chat', 'deepseek-reasoner'],
       ...config,
     });
@@ -106,23 +159,7 @@ export class DeepSeekProvider extends BaseProvider {
         `${this.config.apiBase}/user/balance`,
         apiKey
       ) as DeepSeekBalanceResponse;
-
-      if (!data.is_available || !data.balance_infos?.length) {
-        return null;
-      }
-
-      const info = data.balance_infos[0];
-      const toppedUpBalance = Number(info.topped_up_balance) || 0;
-      const totalBalance = Number(info.total_balance) || 0;
-      const grantedBalance = Number(info.granted_balance) || 0;
-      return {
-        totalCharged: toppedUpBalance,
-        totalUsed: toppedUpBalance - totalBalance + grantedBalance,
-        balance: totalBalance,
-        giftBalance: grantedBalance,
-        currency: info.currency,
-        fetchedAt: Date.now(),
-      };
+      return mapDeepSeekBalanceResponse(data);
     } catch (e) {
       console.error('[TokenLens] 获取余额失败:', e);
       throw e;
@@ -142,7 +179,7 @@ export class DeepSeekProvider extends BaseProvider {
   }
 
   async fetchRecentUsage(apiKey: string, days: number = 7): Promise<UsageEntry[]> {
-    // DeepSeek 官方 API 目前只公开余额查询，没有近期用量查询端点。
+    // DeepSeek 官方 API 目前只公开账户权益查询，没有近期用量查询端点。
     // 用量数据依赖 HTTP 拦截或本地日志解析，避免轮询不存在的 /v1/usage 导致 404 误报。
     return [];
   }
@@ -151,4 +188,13 @@ export class DeepSeekProvider extends BaseProvider {
   async parseLocalUsage(_paths: string[]): Promise<UsageEntry[]> {
     return [];
   }
+
+}
+
+function formatMoney(value: number, currency: string): string {
+  const symbol = currency === 'USD' ? '$' : '¥';
+  if (value === 0) { return `${symbol}0`; }
+  if (Math.abs(value) < 0.01) { return `${symbol}${value.toFixed(4)}`; }
+  if (Math.abs(value) < 1) { return `${symbol}${value.toFixed(3)}`; }
+  return `${symbol}${value.toFixed(2)}`;
 }
